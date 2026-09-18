@@ -89,19 +89,16 @@ if (is.null(openalex_key)) {
 
 
 # ================================================================
-# 1. SAFE EXCEL INPUT HELPER
-# ================================================================
-# SAFE EXCEL INPUT HELPER
+# LOCAL HELPER: SAFE EXCEL INPUT
 # ================================================================
 #
-# Excel outputs are stored in Citation_finder_output. Files stored in
-# cloud-synced or network folders can occasionally be locked or only
-# partially available.
+# Workbooks are read from the directory configured as output_dir in
+# config.R. Files kept in cloud-synced or network folders can be locked
+# or only partially downloaded when R tries to read them.
 #
-# This helper checks the workbook and creates a temporary local copy
-# before openxlsx reads it.
+# This helper checks that the workbook is readable and copies it to a
+# temporary local file before openxlsx opens it.
 # ================================================================
-#
 
 prepare_xlsx_for_read <- function(xlsx_file) {
   
@@ -287,7 +284,7 @@ empty_candidate <- function() {
 
 
 # ================================================================
-# 2. OPENALEX CACHE
+# 1. OPENALEX CACHE
 # ================================================================
 
 if (
@@ -511,7 +508,7 @@ oa_to_search <- function(
 
 
 # ================================================================
-# LOAD DATA REGISTRY CREATED BY:
+# 2. LOAD DATA REGISTRY CREATED BY:
 # R/01_get_dataset_dois.R
 # ================================================================
 
@@ -635,7 +632,7 @@ master_data_registry <- tryCatch(
 
 
 # ================================================================
-# PUBLICATION DISCOVERY
+# 3. PUBLICATION DISCOVERY
 # DATACITE AND OPENALEX METADATA SEARCH
 # ================================================================
 
@@ -647,7 +644,7 @@ cat(
 
 
 # ================================================================
-# DATACITE CITATION RELATIONSHIPS
+# 4. DATACITE CITATION RELATIONSHIPS
 # ================================================================
 
 datacite_citations <- map_dfr(
@@ -768,7 +765,7 @@ datacite_citations <- map_dfr(
 
 
 # ================================================================
-# DATACITE RELATED IDENTIFIER
+# 5. DATACITE RELATED IDENTIFIER
 # ================================================================
 
 datacite_related <- map_dfr(
@@ -907,7 +904,7 @@ datacite_related <- map_dfr(
 
 
 # ================================================================
-# OPENALEX CITATION GRAPH
+# 6. OPENALEX CITATION GRAPH
 # ================================================================
 
 openalex_citations <- map_dfr(
@@ -1060,7 +1057,7 @@ openalex_citations <- map_dfr(
 
 
 # ================================================================
-# OPENALEX DOI + DOI URL TEXT SEARCH
+# 7. OPENALEX DOI + DOI URL TEXT SEARCH
 # ================================================================
 
 openalex_text <- pmap_dfr(
@@ -1203,7 +1200,7 @@ openalex_text <- pmap_dfr(
 
 
 # ================================================================
-# INTERNAL API/METADATA RELATIONSHIPS
+# 8. INTERNAL API/METADATA RELATIONSHIPS
 # ================================================================
 
 api_relationships <- bind_rows(
@@ -1261,7 +1258,7 @@ api_relationships <- bind_rows(
 
 
 # ================================================================
-# FILL TITLE / YEAR FROM DUPLICATE RESULTS
+# 9. FILL TITLE / YEAR FROM DUPLICATE RESULTS
 # ================================================================
 
 api_relationships <- api_relationships %>%
@@ -1287,7 +1284,7 @@ api_relationships <- api_relationships %>%
 
 
 # ================================================================
-# CROSSREF FALLBACK FOR MISSING PAPER METADATA
+# 10. CROSSREF FALLBACK FOR MISSING PAPER METADATA
 # ================================================================
 
 missing_meta <- api_relationships %>%
@@ -1428,7 +1425,7 @@ if (
 
 
 # ================================================================
-# ADD DATASET INFORMATION
+# 11. ADD DATASET INFORMATION
 # ================================================================
 
 api_relationships <- api_relationships %>%
@@ -1456,11 +1453,12 @@ api_relationships <- api_relationships %>%
 
 
 # ================================================================
-# TAB 2
-# PUBLICATION SEARCH
+# 12. OUTPUT SHEET: PUBLICATION_SEARCH
+# ================================================================
 #
-# ONE ROW PER:
-# PAPER DOI + DATASET DOI
+# One row per Paper_DOI + Dataset_DOI found by the DataCite and OpenAlex
+# searches above. This table is written to the Publication_Search
+# worksheet of Publication_Search_Results.xlsx.
 # ================================================================
 
 publication_search <- api_relationships %>%
@@ -1584,7 +1582,7 @@ publication_search <- api_relationships %>%
 
 
 # ================================================================
-# INTERNAL UNIQUE PAPER-DATASET RELATIONSHIPS
+# 13. INTERNAL UNIQUE PAPER-DATASET RELATIONSHIPS
 # ================================================================
 
 api_unique <- api_relationships %>%
@@ -1627,7 +1625,7 @@ api_unique <- api_relationships %>%
 
 
 # ================================================================
-# KEYWORD DISCOVERY + PDF FULL-TEXT VERIFICATION
+# 14. KEYWORD DISCOVERY + PDF FULL-TEXT VERIFICATION
 # ================================================================
 
 cat(
@@ -1820,7 +1818,7 @@ keyword_raw <- map_dfr(
 
 
 # ================================================================
-# ONE KEYWORD CANDIDATE PER PAPER
+# 15. ONE KEYWORD CANDIDATE PER PAPER
 #
 # IMPORTANT:
 # We keep papers even if they already appear in Publication_Search.
@@ -1866,7 +1864,7 @@ keyword_candidates <- keyword_raw %>%
 
 
 # ================================================================
-# PDF TO MARKDOWN-LIKE TEXT
+# 16. PDF TO MARKDOWN-LIKE TEXT
 # ================================================================
 
 pdf_to_markdown <- function(
@@ -1931,7 +1929,7 @@ pdf_to_markdown <- function(
 
 
 # ================================================================
-# SEARCH COMPLETE EXTRACTED PDF TEXT
+# 17. SEARCH COMPLETE EXTRACTED PDF TEXT
 # ================================================================
 
 search_pdf_text <- function(md) {
@@ -2128,7 +2126,7 @@ search_pdf_text <- function(md) {
 
 
 # ================================================================
-# VERIFY ONE PDF
+# 18. VERIFY ONE PDF
 # ================================================================
 
 verify_pdf <- function(
@@ -2516,7 +2514,12 @@ verify_pdf <- function(
 
 
 # ================================================================
-# RUN PDF CHECK
+# 19. OUTPUT SHEET: PDF_RESULTS
+# ================================================================
+#
+# Checks each keyword-discovered candidate paper. Every candidate gets a
+# row, including candidates with no reachable PDF, so PDF_Status explains
+# what happened. This is written to the PDF_Results worksheet.
 # ================================================================
 
 pdf_results <- if (
@@ -2586,7 +2589,7 @@ pdf_results <- if (
 
 
 # ================================================================
-# PDF CONFIRMED RELATIONSHIPS
+# 20. PDF CONFIRMED RELATIONSHIPS
 # ================================================================
 
 pdf_confirmed <- pdf_results %>%
@@ -2622,7 +2625,12 @@ pdf_confirmed <- pdf_results %>%
 
 
 # ================================================================
-# FINAL INTERNAL PAPER-DATASET RELATIONSHIPS
+# 21. OUTPUT SHEET: FINAL_RELATIONSHIPS
+# ================================================================
+#
+# Combines the API/metadata relationships with the exact relationships
+# confirmed in PDF text, deduplicated to one row per dataset-paper pair.
+# This is the table the comparison scripts (03 and 05) read.
 # ================================================================
 
 final_publication_relationships <- bind_rows(
@@ -2690,7 +2698,7 @@ final_publication_relationships <- bind_rows(
   )
 
 # ================================================================
-# RELATIONSHIPS ADDED ONLY BY PDF VERIFICATION
+# 22. RELATIONSHIPS ADDED ONLY BY PDF VERIFICATION
 # ================================================================
 
 pdf_only_relationships <- final_publication_relationships %>%
@@ -2713,7 +2721,7 @@ if (nrow(pdf_only_relationships) > 0) {
 
 
 # ================================================================
-# SAVE PUBLICATION SEARCH RESULTS
+# 23. SAVE PUBLICATION SEARCH RESULTS
 # ================================================================
 
 openxlsx::write.xlsx(

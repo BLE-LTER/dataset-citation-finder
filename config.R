@@ -6,12 +6,16 @@
 # Edit site-specific settings here instead of changing each workflow
 # script. The numbered scripts source this file automatically.
 #
-# API keys are not stored here. Put them in a local .Renviron file:
+# API keys are not stored here. Put them in a local .Renviron file in the
+# repository root:
 #
 #   EDI_API_KEY=your_key
 #   OPENALEX_API_KEY=your_key
 #
-# Do not commit .Renviron to GitHub.
+# Do not commit .Renviron to GitHub; .gitignore already excludes it.
+# This file reads that .Renviron itself (see API KEYS below), so every
+# workflow script sees the keys even when the R session was started
+# outside the repository root.
 #
 # OUTPUT BEHAVIOR:
 # The numbered scripts write their generated files to output_dir below.
@@ -87,13 +91,15 @@ site_keywords <- c(
 # ------------------------------------------------
 # OUTPUT LOCATION
 # ------------------------------------------------
-# By default, results are written to Citation_finder_output in the
-# repository root.
-# provider or on a particular user's home directory.
+# By default, results are written to a Citation_finder_output folder in
+# the repository root, so that nothing is written outside the project.
+# Change output_dir below if you want results stored somewhere else.
 #
-# The numbered scripts announce the directory before creating it.
-# Change this value if you want results stored somewhere else.
+# The numbered scripts announce this directory before creating it, and
+# they overwrite an output file that already has the same name.
 
+# project_root is normally set by the workflow script that sources this
+# file. The fallback covers sourcing config.R on its own.
 if (!exists("project_root", inherits = TRUE)) {
   project_root <- normalizePath(".", winslash = "/", mustWork = FALSE)
 }
@@ -142,8 +148,22 @@ cache_file <- file.path(
 # ------------------------------------------------
 # API KEYS FROM THE R ENVIRONMENT
 # ------------------------------------------------
-# R normally loads variables from ~/.Renviron or a project .Renviron
-# when the R session starts. See README.md for setup instructions.
+# R loads variables from ~/.Renviron or a project .Renviron when the R
+# session starts, which only happens if R started in the repository root.
+# Reading the project .Renviron here means every workflow script finds
+# the keys no matter where the session was started from. Keys set as
+# operating-system environment variables keep working as well.
+#
+# See README.md for how to create .Renviron.
+
+renviron_file <- file.path(project_root, ".Renviron")
+
+if (file.exists(renviron_file)) {
+  readRenviron(renviron_file)
+}
+
+# Missing keys are not an error here. Each workflow script reports the
+# keys it actually needs, because the scripts need different ones.
 
 edi_key <- Sys.getenv("EDI_API_KEY")
 

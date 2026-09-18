@@ -64,12 +64,27 @@ source(file.path(project_root, "R", "utils.R"))
 load_citation_finder_packages()
 ensure_output_dir()
 
+# This comparison is Zotero-specific. A site that does not track its
+# publications in a Zotero group should skip this script. See README.md.
+
 if (is.null(zotero_group_id) || !nzchar(trimws(zotero_group_id))) {
-  stop("zotero_group_id is required for this script. Set it in config.R.", call. = FALSE)
+  stop(
+    paste0(
+      "zotero_group_id is required for this script. Set it in config.R, or ",
+      "skip this script if your site does not use Zotero."
+    ),
+    call. = FALSE
+  )
 }
 
 if (is.null(website_collection) || !nzchar(trimws(website_collection))) {
-  stop("website_collection is required for this script. Set it in config.R.", call. = FALSE)
+  stop(
+    paste0(
+      "website_collection is required for this script. Set it in config.R ",
+      "to the name of the Zotero collection that holds your publications."
+    ),
+    call. = FALSE
+  )
 }
 
 if (is.null(openalex_key)) {
@@ -163,7 +178,7 @@ final_publication_relationships <- openxlsx::read.xlsx(
 
 
 # ================================================================
-# 5. GET ZOTERO FOR-WEBSITE COLLECTION
+# 2. GET ZOTERO FOR-WEBSITE COLLECTION
 # ================================================================
 
 cat(
@@ -222,7 +237,7 @@ fw_items <- paginate_json(
 
 
 # ================================================================
-# 6. ZOTERO PUBLICATION ITEMS
+# 3. ZOTERO PUBLICATION ITEMS
 # ================================================================
 
 # Publication types are defined in config.R.
@@ -292,7 +307,7 @@ zotero_publications <- purrr::map_dfr(
 
 
 # ================================================================
-# 7. OPENALEX CITATION COUNTS
+# 4. OPENALEX CITATION COUNTS
 # ================================================================
 
 
@@ -352,7 +367,7 @@ zotero_publications <- zotero_publications %>%
 
 
 # ================================================================
-# 8. ZOTERO FOR-WEBSITE TAB
+# 5. ZOTERO FOR-WEBSITE TAB
 # ================================================================
 
 zotero_for_website <- zotero_publications %>%
@@ -412,7 +427,7 @@ zotero_for_website <- zotero_publications %>%
 
 
 # ================================================================
-# 9. BUILD ZOTERO PAPER-DATASET RELATIONSHIPS
+# 6. BUILD ZOTERO PAPER-DATASET RELATIONSHIPS
 # ================================================================
 
 zotero_dataset_evidence <- purrr::map_dfr(
@@ -506,7 +521,7 @@ zotero_dataset_evidence <- purrr::map_dfr(
 
 
 # ================================================================
-# 10. MISSING FROM ZOTERO
+# 7. MISSING FROM ZOTERO
 #
 # Publication was found by the automated workflow but the Paper DOI
 # does not exist anywhere in the configured Zotero collection.
@@ -567,7 +582,7 @@ missing_from_zotero <- final_publication_relationships %>%
 
 
 # ================================================================
-# 11. ZOTERO MISSING DATASET DOI
+# 8. ZOTERO MISSING DATASET DOI
 #
 # Paper exists in Zotero, but a relationship found by the
 # automated workflow is missing from Zotero Extra.
@@ -644,7 +659,7 @@ zotero_missing_dataset_doi <- final_publication_relationships %>%
 
 
 # ================================================================
-# 12. ZOTERO NOT IN SEARCH
+# 9. ZOTERO NOT IN SEARCH
 #
 # Zotero records a specific Paper DOI + Dataset DOI relationship
 # that the automated workflow did not find.
@@ -682,7 +697,7 @@ zotero_not_in_search <- zotero_dataset_evidence %>%
 
 
 # ================================================================
-# 13. WRITE ZOTERO COMPARISON WORKBOOK
+# 10. WRITE ZOTERO COMPARISON WORKBOOK
 # ================================================================
 
 sheets <- list(

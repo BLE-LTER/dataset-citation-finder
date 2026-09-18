@@ -58,26 +58,23 @@ project_root <- if (file.exists("config.R")) {
 }
 
 project_root <- normalizePath(project_root, winslash = "/", mustWork = TRUE)
-
-# Load the project .Renviron before config.R so API keys are available
-# whether the script is run from the project root or from R/.
-renviron_file <- file.path(project_root, ".Renviron")
-
-if (file.exists(renviron_file)) {
-  readRenviron(renviron_file)
-} else {
-  warning(
-    paste0("Could not find project .Renviron at: ", renviron_file),
-    call. = FALSE
-  )
-}
 source(file.path(project_root, "config.R"))
 source(file.path(project_root, "R", "utils.R"))
 load_citation_finder_packages()
 ensure_output_dir()
 
+# This report is EDI-specific: it compares Citation Finder results with
+# journal citations recorded in EDI. A site that does not archive its
+# datasets in EDI should skip this script. See README.md.
+
 if (is.null(edi_scope) || !nzchar(trimws(edi_scope))) {
-  stop("edi_scope is required for this script. Set it in config.R.", call. = FALSE)
+  stop(
+    paste0(
+      "edi_scope is required for this script. Set it in config.R, or skip ",
+      "this script if your site does not archive datasets in EDI."
+    ),
+    call. = FALSE
+  )
 }
 
 if (is.null(edi_key) || !nzchar(trimws(edi_key))) {
@@ -162,7 +159,7 @@ get_series_id <- function(package_id) {
 
 
 # ================================================================
-# 4. CHECK INPUT FILES
+# 1. CHECK INPUT FILES
 # ================================================================
 
 if (!file.exists(data_registry_file)) {
@@ -186,7 +183,7 @@ if (!file.exists(publication_results_file)) {
 
 
 # ================================================================
-# 5. READ DATA REGISTRY
+# 2. READ DATA REGISTRY
 # ================================================================
 
 cat(
@@ -238,7 +235,7 @@ cat(
 
 
 # ================================================================
-# 6. CREATE ONE ROW PER DATASET SERIES
+# 3. CREATE ONE ROW PER DATASET SERIES
 #
 # Keep one real revision-level package ID for each series.
 # EDI requires a revisioned package ID such as knb-lter-ble.3.1.
@@ -290,7 +287,7 @@ print(
 
 
 # ================================================================
-# 7. LOGIN TO EDI
+# 4. LOGIN TO EDI
 # ================================================================
 
 cat(
@@ -311,7 +308,7 @@ cat(
 
 
 # ================================================================
-# 8. GET JOURNAL CITATIONS FROM EDI
+# 5. GET JOURNAL CITATIONS FROM EDI
 #
 # EDIutils::list_data_package_citations() already returns the fields
 # we need:
@@ -553,7 +550,7 @@ Example EDI citations retrieved:
 
 
 # ================================================================
-# 9. LOGOUT OF EDI
+# 6. LOGOUT OF EDI
 # ================================================================
 
 try(
@@ -593,7 +590,7 @@ EDI journal citation records:",
 
 
 # ================================================================
-# 10. READ PUBLICATION SEARCH RESULTS
+# 7. READ PUBLICATION SEARCH RESULTS
 # ================================================================
 
 cat(
@@ -684,7 +681,7 @@ cat(
 
 
 # ================================================================
-# 11. STANDARDIZE PUBLICATION SEARCH
+# 8. STANDARDIZE PUBLICATION SEARCH
 # ================================================================
 
 publication_search <- publication_search %>%
@@ -726,7 +723,7 @@ publication_search <- publication_search %>%
 
 
 # ================================================================
-# 12. STANDARDIZE OPTIONAL COLUMNS
+# 9. STANDARDIZE OPTIONAL COLUMNS
 # ================================================================
 
 if (
@@ -772,7 +769,7 @@ if (
 
 
 # ================================================================
-# 13. ONE ROW PER PAPER-DATASET RELATIONSHIP
+# 10. ONE ROW PER PAPER-DATASET RELATIONSHIP
 # ================================================================
 
 publication_relationships <- publication_search %>%
@@ -788,7 +785,7 @@ publication_relationships <- publication_search %>%
 
 
 # ================================================================
-# 14. COMPARE WITH EDI
+# 11. COMPARE WITH EDI
 #
 # IMPORTANT:
 # Match on BOTH:
@@ -855,7 +852,7 @@ comparison <- publication_relationships %>%
 
 
 # ================================================================
-# 15. ALSO INCLUDE EDI CITATIONS THAT WERE NOT FOUND BY
+# 12. ALSO INCLUDE EDI CITATIONS THAT WERE NOT FOUND BY
 #     PUBLICATION SEARCH
 #
 # This includes:
@@ -918,7 +915,7 @@ edi_only <- edi_citations %>%
 
 
 # ================================================================
-# 16. FINAL ONE-SHEET TABLE
+# 13. FINAL ONE-SHEET TABLE
 # ================================================================
 
 final_comparison <- dplyr::bind_rows(
@@ -963,7 +960,7 @@ final_comparison <- dplyr::bind_rows(
     Paper_Title
   )
 # ================================================================
-# 17. SUMMARY
+# 14. SUMMARY
 # ================================================================
 
 cat(
@@ -1014,7 +1011,7 @@ cat(
 
 
 # ================================================================
-# 18. CREATE EXCEL WORKBOOK
+# 15. CREATE EXCEL WORKBOOK
 # ================================================================
 
 wb <- openxlsx::createWorkbook()
@@ -1034,7 +1031,7 @@ openxlsx::writeData(
 
 
 # ================================================================
-# 19. FORMAT EXCEL
+# 16. FORMAT EXCEL
 # ================================================================
 
 header_style <- openxlsx::createStyle(
@@ -1106,7 +1103,7 @@ openxlsx::addFilter(wb,sheet = "EDI_Citation_Comparison",
 
 
 # ================================================================
-# 20. SAVE
+# 17. SAVE
 # ================================================================
 
 openxlsx::saveWorkbook(wb,edi_journal_citation_file,overwrite =TRUE)

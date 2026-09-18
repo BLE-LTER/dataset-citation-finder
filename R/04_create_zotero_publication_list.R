@@ -59,12 +59,28 @@ source(file.path(project_root, "R", "utils.R"))
 load_citation_finder_packages()
 ensure_output_dir()
 
+# This publication list is built from Zotero. A site that does not track
+# its publications in a Zotero group should skip this script.
+# See README.md.
+
 if (is.null(zotero_group_id) || !nzchar(trimws(zotero_group_id))) {
-  stop("zotero_group_id is required for this script. Set it in config.R.", call. = FALSE)
+  stop(
+    paste0(
+      "zotero_group_id is required for this script. Set it in config.R, or ",
+      "skip this script if your site does not use Zotero."
+    ),
+    call. = FALSE
+  )
 }
 
 if (is.null(website_collection) || !nzchar(trimws(website_collection))) {
-  stop("website_collection is required for this script. Set it in config.R.", call. = FALSE)
+  stop(
+    paste0(
+      "website_collection is required for this script. Set it in config.R ",
+      "to the name of the Zotero collection that holds your publications."
+    ),
+    call. = FALSE
+  )
 }
 
 if (is.null(openalex_key)) {
