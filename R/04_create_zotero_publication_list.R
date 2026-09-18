@@ -1,195 +1,91 @@
 # ================================================================
-# 04_Zotero_Comprehensive_List.R
-# ZOTERO COMPREHENSIVE PUBLICATION LIST
+# 04_create_zotero_publication_list.R
+# CREATE A COMPREHENSIVE ZOTERO PUBLICATION LIST
+# ================================================================
 #
 # PURPOSE:
-# Get publications from Zotero "For-Website"
-# and extract related DOI values from the Extra field.
+# Export one row per publication from the configured Zotero collection,
+# including authors, paper DOI, selected publication-category tags,
+# dataset DOIs recorded in Zotero Extra, and an OpenAlex cited-by count.
+# Publications are retained even when a paper DOI or dataset DOI is absent.
 #
-# Also extract paper authors from Zotero creators.
+# INPUT:
+# A Zotero group and collection configured in config.R. The group must be
+# readable through the Zotero API.
 #
-# Reuses the same helper logic/style as Citation Finder.
+# OPENALEX API KEY:
+# OPENALEX_API_KEY is used to retrieve cited-by counts for publication
+# DOIs. A key is recommended because many requests may be made. Store it
+# in .Renviron, not in this script.
 #
+# OUTPUT:
+# Citation_finder_output/Zotero_Comprehensive_Publication_List.xlsx
+#   Sheet: Zotero_Publications
 #
-# COLUMNS:
-# Paper_Title
-# Paper_Authors
-# Paper_DOI
-# Dataset_DOIs
-# Cited_By_Count
+# OUTPUT COLUMNS:
+# Paper_Title             - Zotero publication title.
+# Paper_Authors           - authors combined with semicolons.
+# Paper_DOI               - normalized publication DOI, when available.
+# Publication_Category    - Foundational and/or Supported Zotero tag.
+# Dataset_DOIs            - dataset DOIs found in Zotero Extra, combined
+#                           with semicolons when more than one is present.
+# Cited_By_Count          - OpenAlex cited_by_count for Paper_DOI.
 #
-# ONE ROW PER:
-# Publication
-#
-# Multiple related dataset DOIs are combined with "; ".
+# FILE BEHAVIOR:
+# The output directory is defined in config.R. If it does not exist,
+# this script announces and creates it. An existing workbook with the
+# same name is overwritten. A completion message prints the saved path.
 # ================================================================
-
-packages <- c(
-  "httr",
-  "jsonlite",
-  "dplyr",
-  "purrr",
-  "stringr",
-  "tibble",
-  "openxlsx"
-)
-
-
-new_packages <- packages[
-  !packages %in%
-    installed.packages()[, "Package"]
-]
-
-
-if (length(new_packages) > 0) {
-  install.packages(new_packages)
-}
-
-
-library(httr)
-library(jsonlite)
-library(dplyr)
-library(purrr)
-library(stringr)
-library(tibble)
-library(openxlsx)
 
 
 # ================================================================
-# 1. SETTINGS
+# LOAD PROJECT CONFIGURATION AND SHARED HELPERS
 # ================================================================
 
-zotero_group_id <- "2211939"
-
-website_collection <- "For-Website"
-
-# Save generated Excel files outside the GitHub repository
-output_dir <- paste0(
-  "C:/Users/im23237/OneDrive - The University of Texas at Austin/",
-  "Documents/Citation_finder_output"
-)
-
-if (!dir.exists(output_dir)) {
-  dir.create(
-    output_dir,
-    recursive = TRUE
+project_root <- if (file.exists("config.R")) {
+  "."
+} else if (file.exists("../config.R")) {
+  ".."
+} else {
+  stop(
+    "Could not find config.R. Run the workflow from the repository root or R folder.",
+    call. = FALSE
   )
 }
 
-output_file <- file.path(
-  output_dir,
-  "Zotero_Comprehensive_Publication_List.xlsx"
-)
+project_root <- normalizePath(project_root, winslash = "/", mustWork = TRUE)
+source(file.path(project_root, "config.R"))
+source(file.path(project_root, "R", "utils.R"))
+load_citation_finder_packages()
+ensure_output_dir()
 
-
-openalex_key <- Sys.getenv(
-  "OPENALEX_API_KEY"
-)
-
-
-if (
-  openalex_key == ""
-) {
-  openalex_key <- NULL
+if (is.null(zotero_group_id) || !nzchar(trimws(zotero_group_id))) {
+  stop("zotero_group_id is required for this script. Set it in config.R.", call. = FALSE)
 }
 
-
-# ================================================================
-# 2. HELPER FUNCTIONS
-# ================================================================
-
-safe <- function(
-    x,
-    default = NA_character_
-) {
-  
-  if (
-    is.null(x) ||
-    length(x) == 0 ||
-    all(is.na(x))
-  ) {
-    
-    return(default)
-  }
-  
-  as.character(x)[1]
+if (is.null(website_collection) || !nzchar(trimws(website_collection))) {
+  stop("website_collection is required for this script. Set it in config.R.", call. = FALSE)
 }
 
-
-clean_doi <- function(x) {
-  
-  if (
-    is.null(x) ||
-    length(x) == 0
-  ) {
-    
-    return(NA_character_)
-  }
-  
-  x <- as.character(x)
-  
-  x <- tolower(x)
-  
-  x <- trimws(x)
-  
-  x <- str_remove(
-    x,
-    "^https?://(dx\\.)?doi\\.org/"
-  )
-  
-  x <- str_remove(
-    x,
-    "^doi:\\s*"
-  )
-  
-  x <- str_remove(
-    x,
-    "[\\.,;]+$"
-  )
-  
-  x[x == ""] <- NA_character_
-  
-  x
-}
-
-
-extract_dois <- function(x) {
-  
-  if (
-    is.null(x) ||
-    length(x) == 0 ||
-    is.na(x) ||
-    x == ""
-  ) {
-    
-    return(character())
-  }
-  
-  dois <- str_extract_all(
-    
-    x,
-    
-    regex(
-      "10\\.[0-9]{4,9}/[-._;()/:A-Z0-9]+",
-      ignore_case = TRUE
-    )
-    
-  )[[1]]
-  
-  dois <- clean_doi(
-    dois
-  )
-  
-  unique(
-    dois[
-      !is.na(dois)
-    ]
+if (is.null(openalex_key)) {
+  warning(
+    paste0(
+      "OPENALEX_API_KEY is not set. Citation-count requests will be attempted without a key, ",
+      "but may be rate limited. See README.md."
+    ),
+    call. = FALSE
   )
 }
 
 
 # ================================================================
-# 2A. EXTRACT PAPER AUTHORS
+# LOCAL HELPERS
+# Shared helpers such as safe(), clean_doi(), extract_dois(),
+# get_json(), and OpenAlex helpers are defined in R/utils.R.
+# ================================================================
+
+# ================================================================
+# EXTRACT PAPER AUTHORS
 # ================================================================
 
 extract_authors <- function(creators) {
@@ -323,262 +219,60 @@ extract_authors <- function(creators) {
 
 
 # ================================================================
-# 3. GENERAL ZOTERO API REQUEST
+# EXTRACT FOUNDATIONAL / SUPPORTED CATEGORY FROM ZOTERO TAGS
 # ================================================================
 
-get_json <- function(
-    url,
-    query = list(),
-    attempts = 4
-) {
-  
-  for (
-    i in seq_len(attempts)
-  ) {
-    
-    response <- tryCatch(
-      
-      GET(
-        url,
-        query = query,
-        timeout(60),
-        user_agent(
-          "BLE-LTER-Zotero-comprehensive-export"
-        )
-      ),
-      
-      error = function(e) {
-        NULL
-      }
-    )
-    
-    
-    if (
-      is.null(response)
-    ) {
-      
-      Sys.sleep(
-        min(
-          10,
-          2^i
-        )
-      )
-      
-      next
-    }
-    
-    
-    status <- status_code(
-      response
-    )
-    
-    
-    if (
-      status == 200
-    ) {
-      
-      result <- tryCatch(
-        
-        fromJSON(
-          content(
-            response,
-            "text",
-            encoding = "UTF-8"
-          ),
-          simplifyVector = FALSE
-        ),
-        
-        error = function(e) {
-          NULL
-        }
-      )
-      
-      
-      if (
-        !is.null(result)
-      ) {
-        
-        return(result)
-      }
-    }
-    
-    
-    if (
-      status == 429
-    ) {
-      
-      wait <- c(
-        5,
-        10,
-        20,
-        30
-      )
-      
-      
-      Sys.sleep(
-        wait[
-          min(
-            i,
-            length(wait)
-          )
-        ]
-      )
-      
-      next
-    }
-    
-    
-    stop(
-      paste(
-        "Zotero API request failed. HTTP status:",
-        status
-      )
-    )
-  }
-  
-  
-  stop(
-    paste(
-      "Zotero request failed after",
-      attempts,
-      "attempts."
-    )
-  )
-}
-
-
-# ================================================================
-# 3A. OPENALEX CITED-BY COUNT
-# ================================================================
-
-get_openalex_citation_count <- function(
-    paper_doi
-) {
-  
-  doi <- clean_doi(
-    paper_doi
-  )
-  
-  if (is.na(doi)) {
-    return(
-      tibble(
-        Paper_DOI = NA_character_,
-        Cited_By_Count = NA_integer_
-      )
-    )
-  }
-  
-  query <- list(
-    filter = paste0(
-      "doi:https://doi.org/",
-      doi
-    ),
-    corpus = "all",
-    per_page = 1
-  )
-  
-  if (!is.null(openalex_key)) {
-    query$api_key <- openalex_key
-  }
-  
-  result <- tryCatch(
-    get_json(
-      "https://api.openalex.org/works",
-      query
-    ),
-    error = function(e) NULL
-  )
+extract_publication_category <- function(tags) {
   
   if (
-    is.null(result) ||
-    is.null(result$results) ||
-    !length(result$results)
+    is.null(tags) ||
+    length(tags) == 0
   ) {
-    return(
-      tibble(
-        Paper_DOI = doi,
-        Cited_By_Count = NA_integer_
-      )
-    )
+    return(NA_character_)
   }
   
-  tibble(
-    Paper_DOI = doi,
-    Cited_By_Count = suppressWarnings(
-      as.integer(
-        safe(result$results[[1]]$cited_by_count)
+  tag_values <- map_chr(
+    tags,
+    function(tag) {
+      safe(
+        tag$tag,
+        ""
       )
-    )
+    }
+  )
+  
+  tag_values <- tag_values[
+    !is.na(tag_values) &
+      tag_values != ""
+  ]
+  
+  category_tags <- tag_values[
+    tolower(tag_values) %in%
+      c(
+        "foundational",
+        "supported"
+      )
+  ]
+  
+  if (length(category_tags) == 0) {
+    return(NA_character_)
+  }
+  
+  category_tags <- dplyr::case_when(
+    tolower(category_tags) == "foundational" ~ "Foundational",
+    tolower(category_tags) == "supported" ~ "Supported",
+    TRUE ~ category_tags
+  )
+  
+  paste(
+    unique(category_tags),
+    collapse = "; "
   )
 }
 
 
 # ================================================================
-# 4. ZOTERO PAGINATION
-# ================================================================
-
-paginate_zotero <- function(
-    url,
-    extra = list()
-) {
-  
-  all_items <- list()
-  
-  start <- 0
-  
-  
-  repeat {
-    
-    result <- get_json(
-      
-      url,
-      
-      c(
-        
-        list(
-          limit = 100,
-          start = start,
-          v = 3
-        ),
-        
-        extra
-      )
-    )
-    
-    
-    if (
-      is.null(result) ||
-      length(result) == 0
-    ) {
-      
-      break
-    }
-    
-    
-    all_items <- append(
-      all_items,
-      result
-    )
-    
-    
-    if (
-      length(result) < 100
-    ) {
-      
-      break
-    }
-    
-    
-    start <- start + 100
-  }
-  
-  
-  all_items
-}
-
-
-# ================================================================
-# 5. GET ZOTERO COLLECTIONS
+# 1. GET ZOTERO COLLECTIONS
 # ================================================================
 
 cat(
@@ -588,7 +282,7 @@ cat(
 )
 
 
-collections <- paginate_zotero(
+collections <- paginate_json(
   
   paste0(
     "https://api.zotero.org/groups/",
@@ -599,7 +293,7 @@ collections <- paginate_zotero(
 
 
 # ================================================================
-# 6. FIND FOR-WEBSITE COLLECTION
+# 2. FIND CONFIGURED WEBSITE COLLECTION
 # ================================================================
 
 collection_match <- keep(
@@ -635,24 +329,24 @@ collection_key <- safe(
 
 
 cat(
-  "For-Website collection key:",
+  "Configured collection key:",
   collection_key,
   "\n"
 )
 
 
 # ================================================================
-# 7. GET ALL TOP-LEVEL ITEMS FROM FOR-WEBSITE
+# 3. GET TOP-LEVEL ITEMS FROM CONFIGURED COLLECTION
 # ================================================================
 
 cat(
   "\n========================================\n",
-  "GETTING FOR-WEBSITE ITEMS\n",
+  "GETTING CONFIGURED COLLECTION ITEMS\n",
   "========================================\n"
 )
 
 
-items <- paginate_zotero(
+items <- paginate_json(
   
   paste0(
     "https://api.zotero.org/groups/",
@@ -672,21 +366,13 @@ cat(
 
 
 # ================================================================
-# 8. PUBLICATION TYPES
+# 4. PUBLICATION TYPES
 # ================================================================
 
-publication_types <- c(
-  "journalArticle",
-  "conferencePaper",
-  "bookSection",
-  "preprint",
-  "report",
-  "thesis"
-)
-
+# Publication types are defined in config.R.
 
 # ================================================================
-# 9. GET PUBLICATION TITLE, AUTHORS, DOI, AND EXTRA
+# 5. EXTRACT PUBLICATION FIELDS
 # ================================================================
 
 zotero_publications <- map_dfr(
@@ -781,6 +467,11 @@ zotero_publications <- map_dfr(
       Paper_DOI =
         paper_doi,
       
+      Publication_Category =
+        extract_publication_category(
+          d$tags
+        ),
+      
       Zotero_Extra =
         safe(
           d$extra,
@@ -801,7 +492,7 @@ cat(
 
 
 # ================================================================
-# 10. EXTRACT RELATED DOI VALUES FROM ZOTERO EXTRA
+# 6. EXTRACT RELATED DATASET DOIS FROM ZOTERO EXTRA
 #
 # IMPORTANT:
 # ALL publications are kept.
@@ -883,6 +574,9 @@ zotero_related_dois <- map_dfr(
               row$Paper_DOI
             ),
           
+          Publication_Category =
+            row$Publication_Category,
+          
           Dataset_DOI =
             NA_character_
         )
@@ -907,6 +601,9 @@ zotero_related_dois <- map_dfr(
           row$Paper_DOI
         ),
       
+      Publication_Category =
+        row$Publication_Category,
+      
       Dataset_DOI =
         extra_dois
     )
@@ -915,7 +612,7 @@ zotero_related_dois <- map_dfr(
 
 
 # ================================================================
-# 11. FINAL CLEAN TABLE
+# 7. BUILD FINAL CLEAN TABLE
 #
 # ONE ROW PER PUBLICATION.
 # Multiple related dataset DOIs are combined with "; ".
@@ -928,7 +625,8 @@ zotero_citation_list <- zotero_related_dois %>%
   group_by(
     Paper_Title,
     Paper_Authors,
-    Paper_DOI
+    Paper_DOI,
+    Publication_Category
   ) %>%
   summarise(
     Dataset_DOIs = {
@@ -952,17 +650,13 @@ zotero_citation_list <- zotero_related_dois %>%
 
 
 # ================================================================
-# 11A. GET OPENALEX CITATION COUNTS
+# 8. GET OPENALEX CITATION COUNTS
 # ================================================================
 
 cat(
   "\n========================================\n",
   "GETTING OPENALEX CITATION COUNTS\n",
   "========================================\n"
-)
-
-citation_count_date <- as.character(
-  Sys.Date()
 )
 
 unique_paper_dois <- zotero_citation_list %>%
@@ -991,17 +685,13 @@ zotero_citation_list <- zotero_citation_list %>%
     citation_counts,
     by = "Paper_DOI"
   ) %>%
-  mutate(
-    Citation_Count_Date =
-      citation_count_date
-  ) %>%
   select(
     Paper_Title,
     Paper_Authors,
     Paper_DOI,
+    Publication_Category,
     Dataset_DOIs,
-    Cited_By_Count,
-    Citation_Count_Date
+    Cited_By_Count
   ) %>%
   arrange(
     Paper_Title
@@ -1009,12 +699,12 @@ zotero_citation_list <- zotero_citation_list %>%
 
 
 # ================================================================
-# 12. SUMMARY
+# 9. SUMMARY
 # ================================================================
 
 cat(
   "\n========================================\n",
-  "ZOTERO BLE CITATION SUMMARY\n",
+  "ZOTERO PUBLICATION SUMMARY\n",
   "========================================\n"
 )
 
@@ -1061,11 +751,6 @@ cat(
 )
 
 
-cat(
-  "Citation count date:",
-  citation_count_date,
-  "\n"
-)
 
 
 cat(
@@ -1078,7 +763,7 @@ cat(
 
 
 # ================================================================
-# 13. CREATE EXCEL
+# 10. CREATE EXCEL
 # ================================================================
 
 wb <- createWorkbook()
@@ -1098,7 +783,7 @@ writeData(
 
 
 # ================================================================
-# 14. FORMAT EXCEL
+# 11. FORMAT EXCEL
 # ================================================================
 
 header_style <- createStyle(
@@ -1171,14 +856,14 @@ if (
 
 
 # ================================================================
-# 15. SAVE
+# 12. SAVE
 # ================================================================
 
 saveWorkbook(
   
   wb,
   
-  output_file,
+  zotero_comprehensive_file,
   
   overwrite =
     TRUE
@@ -1186,7 +871,7 @@ saveWorkbook(
 
 
 # ================================================================
-# 16. FINAL MESSAGE
+# 13. FINAL MESSAGE
 # ================================================================
 
 cat(
@@ -1195,7 +880,7 @@ cat(
   "========================================\n",
   "Saved as:\n",
   normalizePath(
-    output_file,
+    zotero_comprehensive_file,
     winslash = "/",
     mustWork = FALSE
   ),

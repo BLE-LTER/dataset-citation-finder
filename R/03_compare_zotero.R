@@ -1,428 +1,90 @@
 # ================================================================
-# 03_Zotero_Comparison.R
+# 03_compare_zotero.R
+# COMPARE CITATION FINDER RESULTS WITH ZOTERO
+# ================================================================
 #
-# PURPOSE
-# Compare automated publication-dataset relationships with the
-# Zotero For-Website collection and create Zotero review tabs.
+# PURPOSE:
+# Compare paper-dataset relationships discovered by
+# R/02_find_dataset_citations.R with the configured Zotero publication
+# collection. This produces review lists for publications or dataset DOI
+# relationships that may need curation in Zotero.
 #
-# INPUTS
-#   Data_Registry.xlsx
-#   Publication_Search_Results.xlsx
+# INPUTS:
+# Citation_finder_output/Data_Registry.xlsx
+# Citation_finder_output/Publication_Search_Results.xlsx
+# A Zotero group and collection configured in config.R.
 #
-# OUTPUT
-#   Zotero_Comparison.xlsx
+# ZOTERO ACCESS:
+# The configured Zotero group must be readable through the Zotero API.
+# This workflow currently uses public/readable group requests and does not
+# store a Zotero API key.
+#
+# OPENALEX API KEY:
+# OPENALEX_API_KEY is used to retrieve cited-by counts for publication
+# DOIs. A key is recommended because the workflow can make many OpenAlex
+# requests. Store it in .Renviron, not in this script.
+#
+# OUTPUT:
+# Citation_finder_output/Zotero_Comparison.xlsx
+#   Zotero_For_Website       - publications currently in the configured
+#                              Zotero collection.
+#   Missing_From_Zotero      - papers found by Citation Finder whose paper
+#                              DOI is not in the Zotero collection.
+#   Zotero_Missing_Data_DOI  - paper exists in Zotero, but a specific
+#                              paper-dataset relationship is absent from
+#                              the Zotero Extra field.
+#   Zotero_Not_In_Search     - relationship recorded in Zotero Extra but
+#                              not found by the automated citation search.
+#
+# FILE BEHAVIOR:
+# The output directory is defined in config.R. If it does not exist,
+# this script announces and creates it. An existing Zotero_Comparison.xlsx
+# is overwritten. A completion message prints counts and the saved path.
 # ================================================================
 
 
 # ================================================================
-# 1. PACKAGES
+# LOAD PROJECT CONFIGURATION AND SHARED HELPERS
 # ================================================================
 
-pkgs <- c(
-  "httr",
-  "jsonlite",
-  "dplyr",
-  "purrr",
-  "stringr",
-  "tibble",
-  "tidyr",
-  "openxlsx"
-)
-
-new <- pkgs[!pkgs %in% installed.packages()[, "Package"]]
-
-if (length(new)) {
-  install.packages(new)
-}
-
-invisible(
-  lapply(
-    pkgs,
-    library,
-    character.only = TRUE
-  )
-)
-
-
-# ================================================================
-# 2. SETTINGS
-# ================================================================
-
-zotero_group_id <- "2211939"
-
-website_collection <- "For-Website"
-
-# Save/read generated Excel files outside the GitHub repository
-output_dir <- paste0(
-  "C:/Users/im23237/OneDrive - The University of Texas at Austin/",
-  "Documents/Citation_finder_output"
-)
-
-if (!dir.exists(output_dir)) {
-  dir.create(
-    output_dir,
-    recursive = TRUE
-  )
-}
-
-data_registry_file <- file.path(
-  output_dir,
-  "Data_Registry.xlsx"
-)
-
-publication_results_file <- file.path(
-  output_dir,
-  "Publication_Search_Results.xlsx"
-)
-
-output_file <- file.path(
-  output_dir,
-  "Zotero_Comparison.xlsx"
-)
-
-cache_file <- "openalex_cache.rds"
-
-
-# ================================================================
-# 3. OPENALEX KEY
-# ================================================================
-
-openalex_key <- Sys.getenv("OPENALEX_API_KEY")
-
-if (openalex_key == "") {
-  openalex_key <- NULL
-}
-
-
-# ================================================================
-# 4. HELPERS
-# ================================================================
-
-safe <- function(x, default = NA_character_) {
-  
-  if (
-    is.null(x) ||
-    !length(x) ||
-    all(is.na(x))
-  ) {
-    return(default)
-  }
-  
-  as.character(x)[1]
-}
-
-
-clean_doi <- function(x) {
-  
-  if (
-    is.null(x) ||
-    !length(x)
-  ) {
-    return(NA_character_)
-  }
-  
-  x <- tolower(
-    trimws(
-      as.character(x)
-    )
-  )
-  
-  x <- stringr::str_remove(
-    x,
-    "^https?://(dx\\.)?doi\\.org/"
-  )
-  
-  x <- stringr::str_remove(
-    x,
-    "^doi:\\s*"
-  )
-  
-  x <- stringr::str_remove(
-    x,
-    "[\\.,;]+$"
-  )
-  
-  x[x == ""] <- NA_character_
-  
-  x
-}
-
-
-extract_dois <- function(x) {
-  
-  z <- stringr::str_extract_all(
-    paste(
-      x,
-      collapse = " "
-    ),
-    stringr::regex(
-      "10\\.[0-9]{4,9}/[-._;()/:A-Z0-9]+",
-      ignore_case = TRUE
-    )
-  )[[1]]
-  
-  unique(
-    na.omit(
-      clean_doi(z)
-    )
-  )
-}
-
-
-get_json <- function(
-    url,
-    query = list(),
-    attempts = 4
-) {
-  
-  for (i in seq_len(attempts)) {
-    
-    r <- tryCatch(
-      httr::GET(
-        url,
-        query = query,
-        httr::timeout(60),
-        httr::user_agent("LTER-zotero-comparison")
-      ),
-      error = function(e) NULL
-    )
-    
-    if (is.null(r)) {
-      Sys.sleep(min(15, 2^i))
-      next
-    }
-    
-    s <- httr::status_code(r)
-    
-    if (s == 200) {
-      
-      dat <- tryCatch(
-        jsonlite::fromJSON(
-          httr::content(
-            r,
-            "text",
-            encoding = "UTF-8"
-          ),
-          simplifyVector = FALSE
-        ),
-        error = function(e) NULL
-      )
-      
-      return(
-        list(
-          ok = !is.null(dat),
-          data = dat
-        )
-      )
-    }
-    
-    if (s == 429) {
-      waits <- c(10, 20, 30)
-      
-      if (i > length(waits)) {
-        break
-      }
-      
-      cat(
-        "HTTP 429 - waiting ",
-        waits[i],
-        " seconds...\n",
-        sep = ""
-      )
-      
-      Sys.sleep(waits[i])
-      next
-    }
-    
-    if (s %in% c(500, 502, 503, 504)) {
-      Sys.sleep(min(20, 2^i))
-      next
-    }
-    
-    break
-  }
-  
-  list(
-    ok = FALSE,
-    data = NULL
-  )
-}
-
-
-paginate_json <- function(
-    url,
-    extra = list()
-) {
-  
-  out <- list()
-  start <- 0
-  
-  repeat {
-    
-    r <- get_json(
-      url,
-      c(
-        list(
-          limit = 100,
-          start = start,
-          v = 3
-        ),
-        extra
-      )
-    )
-    
-    if (
-      !r$ok ||
-      is.null(r$data) ||
-      !length(r$data)
-    ) {
-      break
-    }
-    
-    out <- append(
-      out,
-      r$data
-    )
-    
-    if (length(r$data) < 100) {
-      break
-    }
-    
-    start <- start + 100
-  }
-  
-  out
-}
-
-
-# ================================================================
-# 5. OPENALEX CITATION COUNT CACHE
-# ================================================================
-
-if (file.exists(cache_file)) {
-  
-  oa_cache <- tryCatch(
-    readRDS(cache_file),
-    error = function(e) NULL
-  )
-  
+project_root <- if (file.exists("config.R")) {
+  "."
+} else if (file.exists("../config.R")) {
+  ".."
 } else {
-  
-  oa_cache <- NULL
-}
-
-
-if (
-  is.null(oa_cache) ||
-  !is.list(oa_cache)
-) {
-  oa_cache <- list()
-}
-
-
-if (is.null(oa_cache$paper_metrics)) {
-  oa_cache$paper_metrics <- list()
-}
-
-
-oa_query <- function(q) {
-  
-  if (!is.null(openalex_key)) {
-    q$api_key <- openalex_key
-  }
-  
-  get_json(
-    "https://api.openalex.org/works",
-    q
+  stop(
+    "Could not find config.R. Run the workflow from the repository root or R folder.",
+    call. = FALSE
   )
 }
 
+project_root <- normalizePath(project_root, winslash = "/", mustWork = TRUE)
+source(file.path(project_root, "config.R"))
+source(file.path(project_root, "R", "utils.R"))
+load_citation_finder_packages()
+ensure_output_dir()
 
-get_openalex_citation_count <- function(paper_doi) {
-  
-  doi <- clean_doi(
-    paper_doi
+if (is.null(zotero_group_id) || !nzchar(trimws(zotero_group_id))) {
+  stop("zotero_group_id is required for this script. Set it in config.R.", call. = FALSE)
+}
+
+if (is.null(website_collection) || !nzchar(trimws(website_collection))) {
+  stop("website_collection is required for this script. Set it in config.R.", call. = FALSE)
+}
+
+if (is.null(openalex_key)) {
+  warning(
+    paste0(
+      "OPENALEX_API_KEY is not set. Citation-count requests will be attempted without a key, ",
+      "but may be rate limited. See README.md."
+    ),
+    call. = FALSE
   )
-  
-  if (is.na(doi)) {
-    
-    return(
-      tibble::tibble(
-        Paper_DOI = NA_character_,
-        Cited_By_Count = NA_integer_,
-        OpenAlex_ID = NA_character_
-      )
-    )
-  }
-  
-  
-  if (doi %in% names(oa_cache$paper_metrics)) {
-    
-    cached <- oa_cache$paper_metrics[[doi]]
-    
-    if (is.data.frame(cached)) {
-      return(cached)
-    }
-  }
-  
-  
-  r <- oa_query(
-    list(
-      filter =
-        paste0(
-          "doi:https://doi.org/",
-          doi
-        ),
-      corpus = "all",
-      per_page = 1
-    )
-  )
-  
-  
-  result <- if (
-    !r$ok ||
-    is.null(r$data$results) ||
-    !length(r$data$results)
-  ) {
-    
-    tibble::tibble(
-      Paper_DOI = doi,
-      Cited_By_Count = NA_integer_,
-      OpenAlex_ID = NA_character_
-    )
-    
-  } else {
-    
-    w <- r$data$results[[1]]
-    
-    tibble::tibble(
-      Paper_DOI = doi,
-      Cited_By_Count =
-        suppressWarnings(
-          as.integer(
-            safe(
-              w$cited_by_count
-            )
-          )
-        ),
-      OpenAlex_ID = safe(w$id)
-    )
-  }
-  
-  
-  oa_cache$paper_metrics[[doi]] <<- result
-  
-  saveRDS(
-    oa_cache,
-    cache_file
-  )
-  
-  result
 }
 
 
 # ================================================================
-# 6. LOAD SCRIPT 1 + SCRIPT 2 RESULTS
+# 1. LOAD DATA REGISTRY AND PUBLICATION SEARCH RESULTS
 # ================================================================
 
 if (!file.exists(data_registry_file)) {
@@ -430,7 +92,7 @@ if (!file.exists(data_registry_file)) {
     paste0(
       "Could not find ",
       data_registry_file,
-      ". Run 01_Dataset_Registry.R first."
+      ". Run R/01_get_dataset_dois.R first."
     )
   )
 }
@@ -441,7 +103,7 @@ if (!file.exists(publication_results_file)) {
     paste0(
       "Could not find ",
       publication_results_file,
-      ". Run 02_Publication_Search_PDF.R first."
+      ". Run R/02_find_dataset_citations.R first."
     )
   )
 }
@@ -501,7 +163,7 @@ final_publication_relationships <- openxlsx::read.xlsx(
 
 
 # ================================================================
-# 7. GET ZOTERO FOR-WEBSITE COLLECTION
+# 5. GET ZOTERO FOR-WEBSITE COLLECTION
 # ================================================================
 
 cat(
@@ -560,18 +222,10 @@ fw_items <- paginate_json(
 
 
 # ================================================================
-# 8. ZOTERO PUBLICATION ITEMS
+# 6. ZOTERO PUBLICATION ITEMS
 # ================================================================
 
-pub_types <- c(
-  "journalArticle",
-  "conferencePaper",
-  "bookSection",
-  "preprint",
-  "report",
-  "thesis"
-)
-
+# Publication types are defined in config.R.
 
 zotero_publications <- purrr::map_dfr(
   
@@ -585,7 +239,7 @@ zotero_publications <- purrr::map_dfr(
       !safe(
         d$itemType
       ) %in%
-      pub_types
+      publication_types
     ) {
       return(tibble::tibble())
     }
@@ -624,10 +278,6 @@ zotero_publications <- purrr::map_dfr(
   
 ) %>%
   
-  dplyr::filter(
-    !is.na(Paper_DOI)
-  ) %>%
-  
   dplyr::mutate(
     Paper_DOI =
       clean_doi(
@@ -635,19 +285,16 @@ zotero_publications <- purrr::map_dfr(
       )
   ) %>%
   
-  dplyr::distinct(
-    Paper_DOI,
+  distinct(
+    Zotero_Item_Key,
     .keep_all = TRUE
   )
 
 
 # ================================================================
-# 9. OPENALEX CITATION COUNTS
+# 7. OPENALEX CITATION COUNTS
 # ================================================================
 
-citation_count_date <- as.character(
-  Sys.Date()
-)
 
 
 all_paper_dois <- union(
@@ -688,12 +335,8 @@ paper_citation_counts <- purrr::map_dfr(
   dplyr::distinct(
     Paper_DOI,
     .keep_all = TRUE
-  ) %>%
-  
-  dplyr::mutate(
-    Citation_Count_Date =
-      citation_count_date
   )
+  
 
 
 zotero_publications <- zotero_publications %>%
@@ -702,16 +345,14 @@ zotero_publications <- zotero_publications %>%
     paper_citation_counts %>%
       dplyr::select(
         Paper_DOI,
-        Cited_By_Count,
-        OpenAlex_ID,
-        Citation_Count_Date
+        Cited_By_Count
       ),
     by = "Paper_DOI"
   )
 
 
 # ================================================================
-# 10. ZOTERO FOR-WEBSITE TAB
+# 8. ZOTERO FOR-WEBSITE TAB
 # ================================================================
 
 zotero_for_website <- zotero_publications %>%
@@ -762,7 +403,6 @@ zotero_for_website <- zotero_publications %>%
     Dataset_DOIs_In_Extra,
     Has_Dataset_DOI_In_Extra,
     Cited_By_Count,
-    Citation_Count_Date,
     Zotero_Extra
   ) %>%
   
@@ -772,7 +412,7 @@ zotero_for_website <- zotero_publications %>%
 
 
 # ================================================================
-# 11. BUILD ZOTERO PAPER-DATASET RELATIONSHIPS
+# 9. BUILD ZOTERO PAPER-DATASET RELATIONSHIPS
 # ================================================================
 
 zotero_dataset_evidence <- purrr::map_dfr(
@@ -866,10 +506,10 @@ zotero_dataset_evidence <- purrr::map_dfr(
 
 
 # ================================================================
-# 12. MISSING FROM ZOTERO
+# 10. MISSING FROM ZOTERO
 #
 # Publication was found by the automated workflow but the Paper DOI
-# does not exist anywhere in the Zotero For-Website collection.
+# does not exist anywhere in the configured Zotero collection.
 #
 # IMPORTANT:
 # Papers that already exist in Zotero but are missing a specific
@@ -891,8 +531,7 @@ missing_from_zotero <- final_publication_relationships %>%
     paper_citation_counts %>%
       dplyr::select(
         Paper_DOI,
-        Cited_By_Count,
-        Citation_Count_Date
+        Cited_By_Count
       ),
     by = "Paper_DOI"
   ) %>%
@@ -915,7 +554,6 @@ missing_from_zotero <- final_publication_relationships %>%
     Dataset_DOI,
     Dataset_Title,
     Cited_By_Count,
-    Citation_Count_Date,
     Found_By
   ) %>%
   
@@ -929,7 +567,7 @@ missing_from_zotero <- final_publication_relationships %>%
 
 
 # ================================================================
-# 13. ZOTERO MISSING DATASET DOI
+# 11. ZOTERO MISSING DATASET DOI
 #
 # Paper exists in Zotero, but a relationship found by the
 # automated workflow is missing from Zotero Extra.
@@ -974,8 +612,7 @@ zotero_missing_dataset_doi <- final_publication_relationships %>%
     paper_citation_counts %>%
       dplyr::select(
         Paper_DOI,
-        Cited_By_Count,
-        Citation_Count_Date
+        Cited_By_Count
       ),
     by = "Paper_DOI"
   ) %>%
@@ -992,7 +629,6 @@ zotero_missing_dataset_doi <- final_publication_relationships %>%
     Dataset_DOI,
     Dataset_Title,
     Cited_By_Count,
-    Citation_Count_Date,
     Zotero_Item_Key,
     Zotero_Extra,
     DOI_In_Extra,
@@ -1008,7 +644,7 @@ zotero_missing_dataset_doi <- final_publication_relationships %>%
 
 
 # ================================================================
-# 14. ZOTERO NOT IN SEARCH
+# 12. ZOTERO NOT IN SEARCH
 #
 # Zotero records a specific Paper DOI + Dataset DOI relationship
 # that the automated workflow did not find.
@@ -1033,8 +669,7 @@ zotero_not_in_search <- zotero_dataset_evidence %>%
     paper_citation_counts %>%
       dplyr::select(
         Paper_DOI,
-        Cited_By_Count,
-        Citation_Count_Date
+        Cited_By_Count
       ),
     by = "Paper_DOI"
   ) %>%
@@ -1047,7 +682,7 @@ zotero_not_in_search <- zotero_dataset_evidence %>%
 
 
 # ================================================================
-# 15. WRITE ZOTERO COMPARISON WORKBOOK
+# 13. WRITE ZOTERO COMPARISON WORKBOOK
 # ================================================================
 
 sheets <- list(
@@ -1128,7 +763,7 @@ purrr::walk(
 
 openxlsx::saveWorkbook(
   wb,
-  output_file,
+  zotero_comparison_file,
   overwrite = TRUE
 )
 
@@ -1137,7 +772,7 @@ cat(
   "\n========================================\n",
   "ZOTERO COMPARISON COMPLETE\n",
   "========================================\n",
-  "Zotero For-Website publications: ",
+  "Configured Zotero publications: ",
   nrow(zotero_for_website),
   "\n",
   "Publications completely missing from Zotero: ",
@@ -1150,7 +785,7 @@ cat(
   nrow(zotero_not_in_search),
   "\n",
   "Saved: ",
-  output_file,
+  zotero_comparison_file,
   "\n",
   "========================================\n"
 )

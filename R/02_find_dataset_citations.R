@@ -1,67 +1,102 @@
-pkgs <- c(
-  "httr",
-  "jsonlite",
-  "dplyr",
-  "purrr",
-  "stringr",
-  "tibble",
-  "tidyr",
-  "openxlsx",
-  "pdftools"
-)
+# ================================================================
+# 02_find_dataset_citations.R
+# PUBLICATION DISCOVERY AND PDF VERIFICATION
+# ================================================================
+#
+# PURPOSE:
+# Discover publications associated with dataset DOIs in Data_Registry.xlsx
+# using DataCite and OpenAlex, then use site-specific keyword searches to
+# find additional candidate papers and verify dataset references in PDFs
+# when an OpenAlex PDF URL is available.
+#
+# INPUT:
+# Citation_finder_output/Data_Registry.xlsx, created by
+# R/01_get_dataset_dois.R.
+#
+# OPENALEX API KEY:
+# OPENALEX_API_KEY is used for OpenAlex citation-graph, text, keyword,
+# requests. This workflow makes many API requests;
+# a free OpenAlex key provides a larger request budget and helps avoid
+# rate-limit failures. Store the key in .Renviron, not in this script.
+# The script can attempt keyless requests when no key is available, but
+# results may be incomplete if OpenAlex rate limits are reached.
+#
+# OUTPUTS:
+# Citation_finder_output/Publication_Search_Results.xlsx
+#   Publication_Search  - metadata/API-discovered paper-dataset pairs.
+#   PDF_Results         - papers discovered by site-keyword searches that
+#                         were checked for an available PDF/full text.
+#   Final_Relationships - union of Publication_Search relationships and
+#                         additional exact dataset references confirmed
+#                         during PDF verification.
+#
+# Citation_finder_output/openalex_cache.rds
+#   Reused to reduce repeated OpenAlex requests on later runs.
+#
+# IMPORTANT COLUMN MEANINGS:
+# Search_Source identifies the service that supplied relationship evidence
+# (DataCite and/or OpenAlex). Search_Method describes the evidence method:
+# Citation relationship, Exact relatedIdentifier, Citation graph,
+# Dataset DOI text, or Final URL text.
+#
+# Discovery_Keyword is the configured site term that caused OpenAlex to
+# return a paper as a PDF candidate. Matched_Site_Keyword is a configured
+# site term actually found in the extracted PDF text. These can differ.
+#
+# WHY FINAL_RELATIONSHIPS CAN HAVE MORE ROWS:
+# Publication_Search contains API/metadata discoveries. PDF verification
+# can confirm an exact paper-dataset relationship that those API searches
+# did not return, so Final_Relationships may legitimately contain more rows.
+# The script reports how many relationships were added only by PDF checking.
+#
+# FILE BEHAVIOR:
+# The output directory is defined in config.R. If it does not exist,
+# this script announces and creates it. Existing output/cache files may be
+# overwritten or updated. A completion message prints counts and file paths.
+# ================================================================
 
-new <- pkgs[
-  !pkgs %in%
-    installed.packages()[, "Package"]
-]
-
-if (length(new)) {
-  install.packages(new)
-}
-
-invisible(
-  lapply(
-    pkgs,
-    library,
-    character.only = TRUE
-  )
-)
 
 # ================================================================
-# 1. OUTPUT / INPUT DIRECTORY
+# LOAD PROJECT CONFIGURATION AND SHARED HELPERS
 # ================================================================
 
-output_dir <- paste0(
-  "C:/Users/im23237/OneDrive - The University of Texas at Austin/",
-  "Documents/Citation_finder_output"
-)
-
-if (!dir.exists(output_dir)) {
-  dir.create(
-    output_dir,
-    recursive = TRUE
+project_root <- if (file.exists("config.R")) {
+  "."
+} else if (file.exists("../config.R")) {
+  ".."
+} else {
+  stop(
+    "Could not find config.R. Run the workflow from the repository root or R folder.",
+    call. = FALSE
   )
 }
 
-data_registry_file <- file.path(
-  output_dir,
-  "Data_Registry.xlsx"
-)
+project_root <- normalizePath(project_root, winslash = "/", mustWork = TRUE)
+source(file.path(project_root, "config.R"))
+source(file.path(project_root, "R", "utils.R"))
+load_citation_finder_packages()
+ensure_output_dir()
 
-search_results_file <- file.path(
-  output_dir,
-  "Publication_Search_Results.xlsx"
-)
+if (is.null(openalex_key)) {
+  warning(
+    paste0(
+      "OPENALEX_API_KEY is not set. OpenAlex requests will be attempted without a key, ",
+      "but this workflow makes many requests and may be rate limited. See README.md."
+    ),
+    call. = FALSE
+  )
+}
 
-cache_file <- "openalex_cache.rds"
 
+# ================================================================
+# 1. SAFE EXCEL INPUT HELPER
 # ================================================================
 # SAFE EXCEL INPUT HELPER
 # ================================================================
 #
-# Excel outputs are stored in Citation_finder_output.
-# Because this folder is located inside OneDrive, the workbook may
-# occasionally be locked or syncing.
+# Excel outputs are stored in Citation_finder_output. Files stored in
+# cloud-synced or network folders can occasionally be locked or only
+# partially available.
 #
 # This helper checks the workbook and creates a temporary local copy
 # before openxlsx reads it.
@@ -75,8 +110,8 @@ prepare_xlsx_for_read <- function(xlsx_file) {
       paste0(
         "Could not find ",
         xlsx_file,
-        ". Run 01_Dataset_Registry.R first and make sure the file is in: ",
-        getwd()
+        ". Run R/01_get_dataset_dois.R first. Expected file: ",
+        xlsx_file
       )
     )
   }
@@ -88,8 +123,8 @@ prepare_xlsx_for_read <- function(xlsx_file) {
       paste0(
         xlsx_file,
         " exists but is empty or unavailable. ",
-        "If it is stored in OneDrive, make sure it is downloaded locally, ",
-        "then rerun 01_Dataset_Registry.R."
+        "If it is stored in a cloud-synced or network folder, make sure it is available locally, ",
+        "then rerun R/01_get_dataset_dois.R."
       )
     )
   }
@@ -111,9 +146,9 @@ prepare_xlsx_for_read <- function(xlsx_file) {
       paste0(
         xlsx_file,
         " is not currently a readable .xlsx workbook. ",
-        "Close the file in Excel, allow OneDrive to finish syncing, ",
+        "Close the file in Excel and allow any file synchronization to finish, ",
         "delete the damaged copy if necessary, and rerun ",
-        "01_Dataset_Registry.R to recreate it."
+        "R/01_get_dataset_dois.R to recreate it."
       )
     )
   }
@@ -134,8 +169,8 @@ prepare_xlsx_for_read <- function(xlsx_file) {
       paste0(
         "R could not make a local copy of ",
         xlsx_file,
-        ". If the file is in OneDrive, right-click it and choose ",
-        "'Always keep on this device', then try again."
+        ". If the file is in a cloud-synced or network folder, make sure ",
+        "the file is available locally, then try again."
       )
     )
   }
@@ -145,124 +180,9 @@ prepare_xlsx_for_read <- function(xlsx_file) {
 
 
 # ================================================================
-# 2. SITE KEYWORDS
+# LOCAL HELPERS
+# Functions shared across scripts are in R/utils.R.
 # ================================================================
-
-site_keywords <- c(
-  
-  "Beaufort Lagoon Ecosystems",
-  "Beaufort Lagoon Ecosystems LTER",
-  "BLE LTER",
-  "BLE-LTER",
-  "Beaufort Lagoon",
-  "knb-lter-ble",
-  "Arctic Lagoon",
-  "Beaufort Sea Coastal Lagoons",
-  "Arctic Coastal"
-)
-
-
-# ================================================================
-# 3. API KEYS
-# ================================================================
-
-openalex_key <- Sys.getenv(
-  "OPENALEX_API_KEY"
-)
-
-
-if (openalex_key == "") {
-  
-  openalex_key <- NULL
-}
-
-
-# ================================================================
-# 4. HELPERS
-# ================================================================
-
-safe <- function(
-    x,
-    default = NA_character_
-) {
-  
-  if (
-    is.null(x) ||
-    !length(x) ||
-    all(is.na(x))
-  ) {
-    
-    return(
-      default
-    )
-  }
-  
-  as.character(x)[1]
-}
-
-
-clean_doi <- function(x) {
-  
-  if (
-    is.null(x) ||
-    !length(x)
-  ) {
-    
-    return(
-      NA_character_
-    )
-  }
-  
-  x <- tolower(
-    trimws(
-      as.character(x)
-    )
-  )
-  
-  x <- str_remove(
-    x,
-    "^https?://(dx\\.)?doi\\.org/"
-  )
-  
-  x <- str_remove(
-    x,
-    "^doi:\\s*"
-  )
-  
-  x <- str_remove(
-    x,
-    "[\\.,;]+$"
-  )
-  
-  x[x == ""] <- NA_character_
-  
-  x
-}
-
-
-extract_dois <- function(x) {
-  
-  z <- str_extract_all(
-    
-    paste(
-      x,
-      collapse = " "
-    ),
-    
-    regex(
-      "10\\.[0-9]{4,9}/[-._;()/:A-Z0-9]+",
-      ignore_case = TRUE
-    )
-    
-  )[[1]]
-  
-  unique(
-    na.omit(
-      clean_doi(z)
-    )
-  )
-}
-
 
 first_text <- function(x) {
   
@@ -367,269 +287,7 @@ empty_candidate <- function() {
 
 
 # ================================================================
-# 5. GENERAL HTTP FUNCTION
-# ================================================================
-
-get_json <- function(
-    url,
-    query = list(),
-    attempts = 4
-) {
-  
-  for (
-    i in seq_len(
-      attempts
-    )
-  ) {
-    
-    r <- tryCatch(
-      
-      GET(
-        
-        url,
-        
-        query =
-          query,
-        
-        timeout(
-          60
-        ),
-        
-        user_agent(
-          "LTER-citation-finder"
-        )
-      ),
-      
-      error = function(e) {
-        
-        NULL
-      }
-    )
-    
-    
-    if (
-      is.null(r)
-    ) {
-      
-      Sys.sleep(
-        min(
-          15,
-          2^i
-        )
-      )
-      
-      next
-    }
-    
-    
-    s <- status_code(
-      r
-    )
-    
-    
-    # ------------------------------------------------
-    # SUCCESS
-    # ------------------------------------------------
-    
-    if (
-      s == 200
-    ) {
-      
-      dat <- tryCatch(
-        
-        fromJSON(
-          
-          content(
-            r,
-            "text",
-            encoding = "UTF-8"
-          ),
-          
-          simplifyVector =
-            FALSE
-        ),
-        
-        error = function(e) {
-          
-          NULL
-        }
-      )
-      
-      
-      return(
-        
-        list(
-          
-          ok =
-            !is.null(dat),
-          
-          data =
-            dat
-        )
-      )
-    }
-    
-    
-    # ------------------------------------------------
-    # RATE LIMIT
-    # ------------------------------------------------
-    
-    if (
-      s == 429
-    ) {
-      
-      waits <- c(
-        10,
-        20,
-        30
-      )
-      
-      
-      if (
-        i >
-        length(waits)
-      ) {
-        
-        break
-      }
-      
-      
-      cat(
-        "HTTP 429 - waiting ",
-        waits[i],
-        " seconds...\n",
-        sep = ""
-      )
-      
-      
-      Sys.sleep(
-        waits[i]
-      )
-      
-      next
-    }
-    
-    
-    # ------------------------------------------------
-    # SERVER ERROR
-    # ------------------------------------------------
-    
-    if (
-      s %in%
-      c(
-        500,
-        502,
-        503,
-        504
-      )
-    ) {
-      
-      Sys.sleep(
-        min(
-          20,
-          2^i
-        )
-      )
-      
-      next
-    }
-    
-    
-    break
-  }
-  
-  
-  list(
-    
-    ok =
-      FALSE,
-    
-    data =
-      NULL
-  )
-}
-
-
-# ================================================================
-# 6. ZOTERO PAGINATION
-# ================================================================
-
-paginate_json <- function(
-    url,
-    extra = list()
-) {
-  
-  out <- list()
-  
-  start <- 0
-  
-  
-  repeat {
-    
-    r <- get_json(
-      
-      url,
-      
-      c(
-        
-        list(
-          
-          limit =
-            100,
-          
-          start =
-            start,
-          
-          v =
-            3
-        ),
-        
-        extra
-      )
-    )
-    
-    
-    if (
-      !r$ok ||
-      is.null(
-        r$data
-      ) ||
-      !length(
-        r$data
-      )
-    ) {
-      
-      break
-    }
-    
-    
-    out <- append(
-      out,
-      r$data
-    )
-    
-    
-    if (
-      length(
-        r$data
-      ) < 100
-    ) {
-      
-      break
-    }
-    
-    
-    start <-
-      start + 100
-  }
-  
-  
-  out
-}
-
-
-# ================================================================
-# 7. OPENALEX CACHE
+# 2. OPENALEX CACHE
 # ================================================================
 
 if (
@@ -754,115 +412,7 @@ oa_cached <- function(
 }
 
 
-oa_query <- function(q) {
-  
-  if (
-    !is.null(
-      openalex_key
-    )
-  ) {
-    
-    q$api_key <-
-      openalex_key
-  }
-  
-  
-  get_json(
-    "https://api.openalex.org/works",
-    q
-  )
-}
-
-
-# ================================================================
-# 7A. OPENALEX CITED-BY COUNT FOR A PUBLICATION
-# ================================================================
-
-get_openalex_citation_count <- function(
-    paper_doi
-) {
-  
-  doi <- clean_doi(
-    paper_doi
-  )
-  
-  if (
-    is.na(
-      doi
-    )
-  ) {
-    return(
-      tibble(
-        Paper_DOI = NA_character_,
-        Cited_By_Count = NA_integer_,
-        OpenAlex_ID = NA_character_
-      )
-    )
-  }
-  
-  oa_cached(
-    "paper_metrics",
-    doi,
-    function() {
-      
-      r <- oa_query(
-        list(
-          filter = paste0(
-            "doi:https://doi.org/",
-            doi
-          ),
-          corpus = "all",
-          per_page = 1
-        )
-      )
-      
-      if (!r$ok) {
-        return(
-          list(
-            ok = FALSE,
-            result = tibble(
-              Paper_DOI = doi,
-              Cited_By_Count = NA_integer_,
-              OpenAlex_ID = NA_character_
-            )
-          )
-        )
-      }
-      
-      if (
-        is.null(r$data$results) ||
-        !length(r$data$results)
-      ) {
-        return(
-          list(
-            ok = TRUE,
-            result = tibble(
-              Paper_DOI = doi,
-              Cited_By_Count = NA_integer_,
-              OpenAlex_ID = NA_character_
-            )
-          )
-        )
-      }
-      
-      w <- r$data$results[[1]]
-      
-      list(
-        ok = TRUE,
-        result = tibble(
-          Paper_DOI = doi,
-          Cited_By_Count = suppressWarnings(
-            as.integer(
-              safe(w$cited_by_count)
-            )
-          ),
-          OpenAlex_ID = safe(w$id)
-        )
-      )
-    }
-  )
-}
-
+# OpenAlex request helpers shared across scripts are defined in R/utils.R.
 
 oa_to_search <- function(
     results,
@@ -962,7 +512,7 @@ oa_to_search <- function(
 
 # ================================================================
 # LOAD DATA REGISTRY CREATED BY:
-# 01_Dataset_Registry.R
+# R/01_get_dataset_dois.R
 # ================================================================
 
 cat(
@@ -1005,7 +555,7 @@ registry_sheets <- tryCatch(
     stop(
       paste0(
         "The workbook could not be opened by openxlsx. ",
-        "Rerun 01_Dataset_Registry.R to recreate Data_Registry.xlsx.\n",
+        "Rerun R/01_get_dataset_dois.R to recreate Data_Registry.xlsx.\n",
         "Original error: ",
         conditionMessage(e)
       )
@@ -1035,7 +585,7 @@ master_data_registry <- tryCatch(
     stop(
       paste0(
         "Could not read the Data_Registry sheet. ",
-        "Close the workbook in Excel and rerun 01_Dataset_Registry.R if needed.\n",
+        "Close the workbook in Excel and rerun R/01_get_dataset_dois.R if needed.\n",
         "Original error: ",
         conditionMessage(e)
       )
@@ -1085,13 +635,13 @@ master_data_registry <- tryCatch(
 
 
 # ================================================================
-# TASK 2
-# PUBLICATION SEARCH
+# PUBLICATION DISCOVERY
+# DATACITE AND OPENALEX METADATA SEARCH
 # ================================================================
 
 cat(
   "\n========================================\n",
-  "TASK 2 - PUBLICATION SEARCH\n",
+  "PUBLICATION DISCOVERY - DATACITE + OPENALEX\n",
   "========================================\n"
 )
 
@@ -1653,10 +1203,10 @@ openalex_text <- pmap_dfr(
 
 
 # ================================================================
-# INTERNAL TASK 2 RELATIONSHIPS
+# INTERNAL API/METADATA RELATIONSHIPS
 # ================================================================
 
-task2_relationships <- bind_rows(
+api_relationships <- bind_rows(
   
   datacite_citations,
   
@@ -1714,7 +1264,7 @@ task2_relationships <- bind_rows(
 # FILL TITLE / YEAR FROM DUPLICATE RESULTS
 # ================================================================
 
-task2_relationships <- task2_relationships %>%
+api_relationships <- api_relationships %>%
   
   group_by(
     Paper_DOI
@@ -1740,7 +1290,7 @@ task2_relationships <- task2_relationships %>%
 # CROSSREF FALLBACK FOR MISSING PAPER METADATA
 # ================================================================
 
-missing_meta <- task2_relationships %>%
+missing_meta <- api_relationships %>%
   
   filter(
     
@@ -1845,7 +1395,7 @@ if (
   )
   
   
-  task2_relationships <- task2_relationships %>%
+  api_relationships <- api_relationships %>%
     
     left_join(
       
@@ -1881,7 +1431,7 @@ if (
 # ADD DATASET INFORMATION
 # ================================================================
 
-task2_relationships <- task2_relationships %>%
+api_relationships <- api_relationships %>%
   
   left_join(
     
@@ -1913,7 +1463,7 @@ task2_relationships <- task2_relationships %>%
 # PAPER DOI + DATASET DOI
 # ================================================================
 
-publication_search <- task2_relationships %>%
+publication_search <- api_relationships %>%
   
   group_by(
     Paper_DOI,
@@ -2037,7 +1587,7 @@ publication_search <- task2_relationships %>%
 # INTERNAL UNIQUE PAPER-DATASET RELATIONSHIPS
 # ================================================================
 
-task2_unique <- task2_relationships %>%
+api_unique <- api_relationships %>%
   
   group_by(
     Dataset_DOI,
@@ -2077,13 +1627,12 @@ task2_unique <- task2_relationships %>%
 
 
 # ================================================================
-# TASK 3
-# KEYWORD DISCOVERY + PDF FULL-TEXT CHECK
+# KEYWORD DISCOVERY + PDF FULL-TEXT VERIFICATION
 # ================================================================
 
 cat(
   "\n========================================\n",
-  "TASK 3 - KEYWORD + PDF FULL-TEXT CHECK\n",
+  "KEYWORD + PDF FULL-TEXT VERIFICATION\n",
   "========================================\n"
 )
 
@@ -3078,7 +2627,7 @@ pdf_confirmed <- pdf_results %>%
 
 final_publication_relationships <- bind_rows(
   
-  task2_unique,
+  api_unique,
   
   pdf_confirmed
   
@@ -3141,6 +2690,29 @@ final_publication_relationships <- bind_rows(
   )
 
 # ================================================================
+# RELATIONSHIPS ADDED ONLY BY PDF VERIFICATION
+# ================================================================
+
+pdf_only_relationships <- final_publication_relationships %>%
+  dplyr::anti_join(
+    publication_search %>%
+      dplyr::distinct(Paper_DOI, Dataset_DOI),
+    by = c("Paper_DOI", "Dataset_DOI")
+  )
+
+
+if (nrow(pdf_only_relationships) > 0) {
+  cat(
+    "\nRelationships added only by PDF verification:\n"
+  )
+  print(
+    pdf_only_relationships %>%
+      dplyr::select(Paper_DOI, Dataset_DOI, Paper_Title, Found_By)
+  )
+}
+
+
+# ================================================================
 # SAVE PUBLICATION SEARCH RESULTS
 # ================================================================
 
@@ -3150,17 +2722,7 @@ openxlsx::write.xlsx(
     PDF_Results = pdf_results,
     Final_Relationships = final_publication_relationships
   ),
-  file = search_results_file,
-  overwrite = TRUE
-)
-
-openxlsx::write.xlsx(
-  list(
-    Publication_Search = publication_search,
-    PDF_Results = pdf_results,
-    Final_Relationships = final_publication_relationships
-  ),
-  file = search_results_file,
+  file = publication_results_file,
   overwrite = TRUE
 )
 
@@ -3168,9 +2730,10 @@ cat(
   "\n========================================\n",
   "PUBLICATION SEARCH + PDF CHECK COMPLETE\n",
   "========================================\n",
-  "Saved results: ", search_results_file, "\n",
+  "Saved results: ", publication_results_file, "\n",
   "Publication-search relationships: ", nrow(publication_search), "\n",
   "PDF candidates checked: ", n_distinct(pdf_results$Paper_DOI), "\n",
+  "Relationships added only by PDF verification: ", nrow(pdf_only_relationships), "\n",
   "Final paper-dataset relationships: ", nrow(final_publication_relationships), "\n",
   "========================================\n"
 )
