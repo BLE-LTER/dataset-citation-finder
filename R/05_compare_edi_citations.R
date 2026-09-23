@@ -10,8 +10,10 @@
 # to EDI automatically.
 #
 # INPUTS:
-# Citation_finder_output/Data_Registry.xlsx
-# Citation_finder_output/Publication_Search_Results.xlsx
+# Read from the directory set by output_dir in config.R:
+#   Data_Registry.xlsx, created by R/01_get_dataset_dois.R.
+#   Publication_Search_Results.xlsx, created by
+#     R/02_find_dataset_citations.R.
 # EDI settings from config.R and EDI_API_KEY from .Renviron.
 #
 # EDI API KEY:
@@ -19,7 +21,9 @@
 # citations from EDI. Store the key in .Renviron, not in this script.
 #
 # OUTPUT:
-# Citation_finder_output/EDI_Journal_Citation_Comparison.xlsx
+# EDI_Journal_Citation_Comparison.xlsx, written to the directory set by
+# output_dir in config.R (by default Citation_finder_output in the
+# repository root).
 #   Sheet: EDI_Citation_Comparison
 #
 # OUTPUT COLUMNS:
@@ -159,27 +163,22 @@ get_series_id <- function(package_id) {
 
 
 # ================================================================
-# 1. CHECK INPUT FILES
+# 1. CHECK INPUT FILES AND STAGE LOCAL COPIES
 # ================================================================
 
-if (!file.exists(data_registry_file)) {
-  stop(
-    paste(
-      "Could not find:",
-      data_registry_file
-    )
-  )
-}
+# prepare_xlsx_for_read() (R/utils.R) checks that each workbook exists and
+# is readable, names the script to rerun if it is not, and returns a local
+# temporary copy so a cloud-synced or locked original cannot fail the read.
 
+data_registry_local <- prepare_xlsx_for_read(
+  data_registry_file,
+  created_by = "R/01_get_dataset_dois.R"
+)
 
-if (!file.exists(publication_results_file)) {
-  stop(
-    paste(
-      "Could not find:",
-      publication_results_file
-    )
-  )
-}
+publication_results_local <- prepare_xlsx_for_read(
+  publication_results_file,
+  created_by = "R/02_find_dataset_citations.R"
+)
 
 
 # ================================================================
@@ -194,7 +193,7 @@ cat(
 
 
 data_registry <- openxlsx::read.xlsx(
-  data_registry_file,
+  data_registry_local,
   sheet = "Data_Registry"
 )
 
@@ -603,29 +602,8 @@ cat(
 "
 )
 
-zip_check <- tryCatch(
-  utils::unzip(
-    publication_results_file,
-    list = TRUE
-  ),
-  error = function(e) NULL
-)
-
-if (is.null(zip_check)) {
-  stop(
-    paste0(
-      "Publication_Search_Results.xlsx could not be opened as a valid .xlsx file:
-",
-      publication_results_file,
-      "
-
-Close Excel, allow any file synchronization to finish, and try again."
-    )
-  )
-}
-
 available_sheets <- openxlsx::getSheetNames(
-  publication_results_file
+  publication_results_local
 )
 
 cat(
@@ -644,7 +622,7 @@ if (
 ) {
   
   publication_search <- openxlsx::read.xlsx(
-    publication_results_file,
+    publication_results_local,
     sheet = "Final_Relationships"
   )
   
@@ -654,7 +632,7 @@ if (
 ) {
   
   publication_search <- openxlsx::read.xlsx(
-    publication_results_file,
+    publication_results_local,
     sheet = "Publication_Search"
   )
   

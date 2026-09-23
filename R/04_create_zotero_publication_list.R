@@ -9,17 +9,31 @@
 # dataset DOIs recorded in Zotero Extra, and an OpenAlex cited-by count.
 # Publications are retained even when a paper DOI or dataset DOI is absent.
 #
-# INPUT:
-# A Zotero group and collection configured in config.R. The group must be
-# readable through the Zotero API.
+# INPUTS:
+# A Zotero group and publication collection configured in config.R. The
+# group must be readable through the Zotero API.
+#
+# Zotero_Comparison.xlsx, created by R/03_compare_zotero.R, is used when
+# it exists. Its Zotero_For_Website sheet already holds an OpenAlex
+# cited-by count for each publication DOI, so those values are reused and
+# only the missing ones are requested again. The file is optional; if it
+# is absent, every count is retrieved from OpenAlex here instead. Running
+# R/03_compare_zotero.R first therefore avoids duplicate API requests.
+#
+# Those saved counts are only reused while Zotero_Comparison.xlsx is
+# younger than zotero_comparison_cache_max_age_days (config.R). Once
+# the file is older than that, this script treats it as stale and
+# re-fetches every citation count from OpenAlex instead.
 #
 # OPENALEX API KEY:
-# OPENALEX_API_KEY is used to retrieve cited-by counts for publication
-# DOIs. A key is recommended because many requests may be made. Store it
-# in .Renviron, not in this script.
+# OPENALEX_API_KEY is used to retrieve any cited-by counts that could not
+# be reused. A key is recommended because many requests may be made.
+# Store it in .Renviron, not in this script.
 #
 # OUTPUT:
-# Citation_finder_output/Zotero_Comprehensive_Publication_List.xlsx
+# Zotero_Comprehensive_Publication_List.xlsx, written to the directory set
+# by output_dir in config.R (by default Citation_finder_output in the
+# repository root).
 #   Sheet: Zotero_Publications
 #
 # OUTPUT COLUMNS:
@@ -73,11 +87,13 @@ if (is.null(zotero_group_id) || !nzchar(trimws(zotero_group_id))) {
   )
 }
 
-if (is.null(website_collection) || !nzchar(trimws(website_collection))) {
+if (is.null(zotero_publication_collection_id) ||
+    !nzchar(trimws(zotero_publication_collection_id))) {
   stop(
     paste0(
-      "website_collection is required for this script. Set it in config.R ",
-      "to the name of the Zotero collection that holds your publications."
+      "zotero_publication_collection_id is required for this script. Set it ",
+      "in config.R to the ID of the Zotero collection that holds your ",
+      "publications. config.R explains where to find that ID."
     ),
     call. = FALSE
   )
@@ -288,90 +304,44 @@ extract_publication_category <- function(tags) {
 
 
 # ================================================================
-# 1. GET ZOTERO COLLECTIONS
+# 1. GET TOP-LEVEL ITEMS FROM THE CONFIGURED COLLECTION
 # ================================================================
-
-cat(
-  "\n========================================\n",
-  "GETTING ZOTERO COLLECTIONS\n",
-  "========================================\n"
-)
-
-
-collections <- paginate_json(
-  
-  paste0(
-    "https://api.zotero.org/groups/",
-    zotero_group_id,
-    "/collections"
-  )
-)
-
-
-# ================================================================
-# 2. FIND CONFIGURED WEBSITE COLLECTION
-# ================================================================
-
-collection_match <- keep(
-  
-  collections,
-  
-  ~ identical(
-    safe(
-      .x$data$name
-    ),
-    website_collection
-  )
-)
-
-
-if (
-  length(collection_match) == 0
-) {
-  
-  stop(
-    paste0(
-      'Could not find Zotero collection "',
-      website_collection,
-      '".'
-    )
-  )
-}
-
-
-collection_key <- safe(
-  collection_match[[1]]$key
-)
-
-
-cat(
-  "Configured collection key:",
-  collection_key,
-  "\n"
-)
-
-
-# ================================================================
-# 3. GET TOP-LEVEL ITEMS FROM CONFIGURED COLLECTION
+#
+# The collection is requested by ID, so there is no need to list every
+# collection in the group and match one by name.
 # ================================================================
 
 cat(
   "\n========================================\n",
   "GETTING CONFIGURED COLLECTION ITEMS\n",
-  "========================================\n"
+  "========================================\n",
+  "Collection ID: ", zotero_publication_collection_id, "\n",
+  sep = ""
 )
 
 
 items <- paginate_json(
-  
-  paste0(
-    "https://api.zotero.org/groups/",
-    zotero_group_id,
+  zotero_group_url(
     "/collections/",
-    collection_key,
+    zotero_publication_collection_id,
     "/items/top"
   )
 )
+
+
+# An unknown collection ID returns nothing rather than an error, so say
+# so here instead of writing an empty publication list.
+if (!length(items)) {
+  stop(
+    paste0(
+      'The Zotero collection "',
+      zotero_publication_collection_id,
+      '" returned no items. Check zotero_publication_collection_id in ',
+      "config.R, and that the group is readable through the Zotero API."
+    ),
+    call. = FALSE
+  )
+}
 
 
 cat(
@@ -382,13 +352,13 @@ cat(
 
 
 # ================================================================
-# 4. PUBLICATION TYPES
+# 2. PUBLICATION TYPES
 # ================================================================
 
 # Publication types are defined in config.R.
 
 # ================================================================
-# 5. EXTRACT PUBLICATION FIELDS
+# 3. EXTRACT PUBLICATION FIELDS
 # ================================================================
 
 zotero_publications <- map_dfr(
@@ -508,7 +478,7 @@ cat(
 
 
 # ================================================================
-# 6. EXTRACT RELATED DATASET DOIS FROM ZOTERO EXTRA
+# 4. EXTRACT RELATED DATASET DOIS FROM ZOTERO EXTRA
 #
 # IMPORTANT:
 # ALL publications are kept.
@@ -628,7 +598,7 @@ zotero_related_dois <- map_dfr(
 
 
 # ================================================================
-# 7. BUILD FINAL CLEAN TABLE
+# 5. BUILD FINAL CLEAN TABLE
 #
 # ONE ROW PER PUBLICATION.
 # Multiple related dataset DOIs are combined with "; ".
@@ -666,7 +636,7 @@ zotero_citation_list <- zotero_related_dois %>%
 
 
 # ================================================================
-# 8. GET OPENALEX CITATION COUNTS
+# 6. GET OPENALEX CITATION COUNTS
 # ================================================================
 
 cat(
@@ -681,20 +651,183 @@ unique_paper_dois <- zotero_citation_list %>%
   ) %>%
   distinct(Paper_DOI)
 
-citation_counts <- map_dfr(
-  unique_paper_dois$Paper_DOI,
-  function(doi) {
+
+# ------------------------------------------------
+# REUSE COUNTS ALREADY RETRIEVED BY 03_compare_zotero.R
+# ------------------------------------------------
+# 03_compare_zotero.R asks OpenAlex for a cited-by count for every
+# publication DOI and saves the answers in the Zotero_For_Website sheet
+# of Zotero_Comparison.xlsx. Reading those values back means this script
+# only has to ask OpenAlex about DOIs that report is missing.
+#
+# The file is optional. If it has not been created yet, every count is
+# retrieved here instead. The file is also ignored, and every count is
+# retrieved here instead, once it is older than
+# zotero_comparison_cache_max_age_days (config.R) - an old report can
+# be missing cited-by counts for papers OpenAlex has indexed since, or
+# hold counts that have since gone up.
+
+existing_counts <- tibble(
+  Paper_DOI = character(),
+  Cited_By_Count = integer()
+)
+
+# zotero_comparison_cache_max_age_days is set in config.R. The default
+# covers an older config.R that predates this setting.
+max_comparison_age_days <- get0(
+  "zotero_comparison_cache_max_age_days",
+  ifnotfound = 30,
+  inherits = TRUE
+)
+
+if (file.exists(zotero_comparison_file)) {
+
+  comparison_age_days <- as.numeric(
+    difftime(
+      Sys.time(),
+      file.info(zotero_comparison_file)$mtime,
+      units = "days"
+    )
+  )
+
+  comparison_is_fresh <- is.infinite(max_comparison_age_days) ||
+    comparison_age_days < max_comparison_age_days
+
+  if (comparison_is_fresh) {
+
+    existing_counts <- tryCatch(
+      {
+        previous <- openxlsx::read.xlsx(
+          zotero_comparison_file,
+          sheet = "Zotero_For_Website"
+        )
+
+        if (all(c("Paper_DOI", "Cited_By_Count") %in% names(previous))) {
+
+          previous %>%
+            transmute(
+              Paper_DOI = clean_doi(Paper_DOI),
+              Cited_By_Count = suppressWarnings(
+                as.integer(Cited_By_Count)
+              )
+            ) %>%
+            filter(
+              !is.na(Paper_DOI),
+              !is.na(Cited_By_Count)
+            ) %>%
+            distinct(
+              Paper_DOI,
+              .keep_all = TRUE
+            )
+
+        } else {
+          existing_counts
+        }
+      },
+      error = function(e) {
+        message(
+          "Could not reuse counts from ",
+          basename(zotero_comparison_file),
+          "; they will be retrieved from OpenAlex. Reason: ",
+          conditionMessage(e)
+        )
+        existing_counts
+      }
+    )
+
     cat(
-      "OpenAlex cited-by count: ",
-      doi,
-      "\n",
+      "Reusing ",
+      nrow(existing_counts),
+      " cited-by count(s) from ",
+      basename(zotero_comparison_file),
+      " (",
+      round(comparison_age_days, 1),
+      " day(s) old)\n",
       sep = ""
     )
-    get_openalex_citation_count(
-      doi
+
+  } else {
+
+    cat(
+      basename(zotero_comparison_file),
+      " is ",
+      round(comparison_age_days, 1),
+      " day(s) old, which is older than zotero_comparison_cache_max_age_days (",
+      max_comparison_age_days,
+      "). Re-fetching every citation count from OpenAlex instead of reusing it.\n",
+      sep = ""
     )
   }
+
+} else {
+  cat(
+    "No ",
+    basename(zotero_comparison_file),
+    " found. Run R/03_compare_zotero.R first to avoid repeating these ",
+    "OpenAlex requests.\n",
+    sep = ""
+  )
+}
+
+
+# ------------------------------------------------
+# RETRIEVE ONLY THE MISSING COUNTS
+# ------------------------------------------------
+
+dois_to_fetch <- setdiff(
+  unique_paper_dois$Paper_DOI,
+  existing_counts$Paper_DOI
 )
+
+cat(
+  "Cited-by counts to retrieve from OpenAlex: ",
+  length(dois_to_fetch),
+  " of ",
+  nrow(unique_paper_dois),
+  "\n",
+  sep = ""
+)
+
+fetched_counts <- if (length(dois_to_fetch)) {
+
+  map_dfr(
+    dois_to_fetch,
+    function(doi) {
+      cat(
+        "OpenAlex cited-by count: ",
+        doi,
+        "\n",
+        sep = ""
+      )
+      get_openalex_citation_count(
+        doi
+      )
+    }
+  ) %>%
+    select(
+      Paper_DOI,
+      Cited_By_Count
+    )
+
+} else {
+
+  tibble(
+    Paper_DOI = character(),
+    Cited_By_Count = integer()
+  )
+}
+
+citation_counts <- bind_rows(
+  existing_counts,
+  fetched_counts
+) %>%
+  filter(
+    !is.na(Paper_DOI)
+  ) %>%
+  distinct(
+    Paper_DOI,
+    .keep_all = TRUE
+  )
 
 zotero_citation_list <- zotero_citation_list %>%
   left_join(
@@ -715,7 +848,7 @@ zotero_citation_list <- zotero_citation_list %>%
 
 
 # ================================================================
-# 9. SUMMARY
+# 7. SUMMARY
 # ================================================================
 
 cat(
@@ -779,7 +912,7 @@ cat(
 
 
 # ================================================================
-# 10. CREATE EXCEL
+# 8. CREATE EXCEL
 # ================================================================
 
 wb <- createWorkbook()
@@ -799,7 +932,7 @@ writeData(
 
 
 # ================================================================
-# 11. FORMAT EXCEL
+# 9. FORMAT EXCEL
 # ================================================================
 
 header_style <- createStyle(
@@ -872,7 +1005,7 @@ if (
 
 
 # ================================================================
-# 12. SAVE
+# 10. SAVE
 # ================================================================
 
 saveWorkbook(
@@ -887,7 +1020,7 @@ saveWorkbook(
 
 
 # ================================================================
-# 13. FINAL MESSAGE
+# 11. FINAL MESSAGE
 # ================================================================
 
 cat(

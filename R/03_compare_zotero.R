@@ -10,8 +10,10 @@
 # relationships that may need curation in Zotero.
 #
 # INPUTS:
-# Citation_finder_output/Data_Registry.xlsx
-# Citation_finder_output/Publication_Search_Results.xlsx
+# Read from the directory set by output_dir in config.R:
+#   Data_Registry.xlsx, created by R/01_get_dataset_dois.R.
+#   Publication_Search_Results.xlsx, created by
+#     R/02_find_dataset_citations.R.
 # A Zotero group and collection configured in config.R.
 #
 # ZOTERO ACCESS:
@@ -25,7 +27,8 @@
 # requests. Store it in .Renviron, not in this script.
 #
 # OUTPUT:
-# Citation_finder_output/Zotero_Comparison.xlsx
+# Zotero_Comparison.xlsx, written to the directory set by output_dir in
+# config.R (by default Citation_finder_output in the repository root).
 #   Zotero_For_Website       - publications currently in the configured
 #                              Zotero collection.
 #   Missing_From_Zotero      - papers found by Citation Finder whose paper
@@ -77,11 +80,13 @@ if (is.null(zotero_group_id) || !nzchar(trimws(zotero_group_id))) {
   )
 }
 
-if (is.null(website_collection) || !nzchar(trimws(website_collection))) {
+if (is.null(zotero_publication_collection_id) ||
+    !nzchar(trimws(zotero_publication_collection_id))) {
   stop(
     paste0(
-      "website_collection is required for this script. Set it in config.R ",
-      "to the name of the Zotero collection that holds your publications."
+      "zotero_publication_collection_id is required for this script. Set it ",
+      "in config.R to the ID of the Zotero collection that holds your ",
+      "publications. config.R explains where to find that ID."
     ),
     call. = FALSE
   )
@@ -99,33 +104,26 @@ if (is.null(openalex_key)) {
 
 
 # ================================================================
-# 1. LOAD DATA REGISTRY AND PUBLICATION SEARCH RESULTS
+# 1. CHECK, STAGE, AND LOAD DATA REGISTRY AND PUBLICATION SEARCH RESULTS
 # ================================================================
 
-if (!file.exists(data_registry_file)) {
-  stop(
-    paste0(
-      "Could not find ",
-      data_registry_file,
-      ". Run R/01_get_dataset_dois.R first."
-    )
-  )
-}
+# prepare_xlsx_for_read() (R/utils.R) checks that each workbook exists and
+# is readable, names the script to rerun if it is not, and returns a local
+# temporary copy so a cloud-synced or locked original cannot fail the read.
 
+data_registry_local <- prepare_xlsx_for_read(
+  data_registry_file,
+  created_by = "R/01_get_dataset_dois.R"
+)
 
-if (!file.exists(publication_results_file)) {
-  stop(
-    paste0(
-      "Could not find ",
-      publication_results_file,
-      ". Run R/02_find_dataset_citations.R first."
-    )
-  )
-}
+publication_results_local <- prepare_xlsx_for_read(
+  publication_results_file,
+  created_by = "R/02_find_dataset_citations.R"
+)
 
 
 master_data_registry <- openxlsx::read.xlsx(
-  data_registry_file,
+  data_registry_local,
   sheet = "Data_Registry"
 ) %>%
   
@@ -138,7 +136,7 @@ master_data_registry <- openxlsx::read.xlsx(
 
 
 publication_search <- openxlsx::read.xlsx(
-  publication_results_file,
+  publication_results_local,
   sheet = "Publication_Search"
 ) %>%
   
@@ -155,13 +153,13 @@ publication_search <- openxlsx::read.xlsx(
 
 
 pdf_results <- openxlsx::read.xlsx(
-  publication_results_file,
+  publication_results_local,
   sheet = "PDF_Results"
 )
 
 
 final_publication_relationships <- openxlsx::read.xlsx(
-  publication_results_file,
+  publication_results_local,
   sheet = "Final_Relationships"
 ) %>%
   
@@ -178,62 +176,44 @@ final_publication_relationships <- openxlsx::read.xlsx(
 
 
 # ================================================================
-# 2. GET ZOTERO FOR-WEBSITE COLLECTION
+# 2. GET ITEMS FROM THE CONFIGURED PUBLICATION COLLECTION
+# ================================================================
+#
+# The collection is requested by ID, so there is no need to list every
+# collection in the group and match one by name.
 # ================================================================
 
 cat(
   "\n========================================\n",
-  "GETTING ZOTERO FOR-WEBSITE COLLECTION\n",
-  "========================================\n"
-)
-
-
-collections <- paginate_json(
-  paste0(
-    "https://api.zotero.org/groups/",
-    zotero_group_id,
-    "/collections"
-  )
-)
-
-
-fw <- purrr::keep(
-  collections,
-  ~ identical(
-    safe(
-      .x$data$name
-    ),
-    website_collection
-  )
-)
-
-
-if (!length(fw)) {
-  
-  stop(
-    paste0(
-      'Could not find Zotero collection "',
-      website_collection,
-      '".'
-    )
-  )
-}
-
-
-fw_key <- safe(
-  fw[[1]]$key
+  "GETTING ZOTERO PUBLICATION COLLECTION\n",
+  "========================================\n",
+  "Collection ID: ", zotero_publication_collection_id, "\n",
+  sep = ""
 )
 
 
 fw_items <- paginate_json(
-  paste0(
-    "https://api.zotero.org/groups/",
-    zotero_group_id,
+  zotero_group_url(
     "/collections/",
-    fw_key,
+    zotero_publication_collection_id,
     "/items/top"
   )
 )
+
+
+# An unknown collection ID returns nothing rather than an error, so say
+# so here instead of reporting zero publications later on.
+if (!length(fw_items)) {
+  stop(
+    paste0(
+      'The Zotero collection "',
+      zotero_publication_collection_id,
+      '" returned no items. Check zotero_publication_collection_id in ',
+      "config.R, and that the group is readable through the Zotero API."
+    ),
+    call. = FALSE
+  )
+}
 
 
 # ================================================================

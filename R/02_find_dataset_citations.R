@@ -10,19 +10,22 @@
 # when an OpenAlex PDF URL is available.
 #
 # INPUT:
-# Citation_finder_output/Data_Registry.xlsx, created by
-# R/01_get_dataset_dois.R.
+# Data_Registry.xlsx, created by R/01_get_dataset_dois.R, read from the
+# directory set by output_dir in config.R.
 #
 # OPENALEX API KEY:
-# OPENALEX_API_KEY is used for OpenAlex citation-graph, text, keyword,
-# requests. This workflow makes many API requests;
+# OPENALEX_API_KEY is used for the OpenAlex citation-graph, text, and
+# keyword requests made below. This workflow makes many API requests;
 # a free OpenAlex key provides a larger request budget and helps avoid
 # rate-limit failures. Store the key in .Renviron, not in this script.
 # The script can attempt keyless requests when no key is available, but
 # results may be incomplete if OpenAlex rate limits are reached.
 #
 # OUTPUTS:
-# Citation_finder_output/Publication_Search_Results.xlsx
+# Both files are written to the directory set by output_dir in config.R
+# (by default Citation_finder_output in the repository root).
+#
+# Publication_Search_Results.xlsx
 #   Publication_Search  - metadata/API-discovered paper-dataset pairs.
 #   PDF_Results         - papers discovered by site-keyword searches that
 #                         were checked for an available PDF/full text.
@@ -30,8 +33,10 @@
 #                         additional exact dataset references confirmed
 #                         during PDF verification.
 #
-# Citation_finder_output/openalex_cache.rds
-#   Reused to reduce repeated OpenAlex requests on later runs.
+# openalex_cache.rds
+#   Saved OpenAlex responses, reused on later runs to avoid repeating
+#   requests. An entry is reused only while it is younger than
+#   cache_max_age_days (config.R); older entries are re-fetched.
 #
 # IMPORTANT COLUMN MEANINGS:
 # Search_Source identifies the service that supplied relationship evidence
@@ -89,96 +94,9 @@ if (is.null(openalex_key)) {
 
 
 # ================================================================
-# LOCAL HELPER: SAFE EXCEL INPUT
-# ================================================================
-#
-# Workbooks are read from the directory configured as output_dir in
-# config.R. Files kept in cloud-synced or network folders can be locked
-# or only partially downloaded when R tries to read them.
-#
-# This helper checks that the workbook is readable and copies it to a
-# temporary local file before openxlsx opens it.
-# ================================================================
-
-prepare_xlsx_for_read <- function(xlsx_file) {
-  
-  if (!file.exists(xlsx_file)) {
-    stop(
-      paste0(
-        "Could not find ",
-        xlsx_file,
-        ". Run R/01_get_dataset_dois.R first. Expected file: ",
-        xlsx_file
-      )
-    )
-  }
-  
-  file_size <- file.info(xlsx_file)$size
-  
-  if (is.na(file_size) || file_size <= 0) {
-    stop(
-      paste0(
-        xlsx_file,
-        " exists but is empty or unavailable. ",
-        "If it is stored in a cloud-synced or network folder, make sure it is available locally, ",
-        "then rerun R/01_get_dataset_dois.R."
-      )
-    )
-  }
-  
-  valid_zip <- tryCatch(
-    {
-      utils::unzip(
-        xlsx_file,
-        list = TRUE
-      )
-      TRUE
-    },
-    warning = function(w) FALSE,
-    error = function(e) FALSE
-  )
-  
-  if (!valid_zip) {
-    stop(
-      paste0(
-        xlsx_file,
-        " is not currently a readable .xlsx workbook. ",
-        "Close the file in Excel and allow any file synchronization to finish, ",
-        "delete the damaged copy if necessary, and rerun ",
-        "R/01_get_dataset_dois.R to recreate it."
-      )
-    )
-  }
-  
-  local_copy <- file.path(
-    tempdir(),
-    basename(xlsx_file)
-  )
-  
-  copied <- file.copy(
-    from = xlsx_file,
-    to = local_copy,
-    overwrite = TRUE
-  )
-  
-  if (!isTRUE(copied)) {
-    stop(
-      paste0(
-        "R could not make a local copy of ",
-        xlsx_file,
-        ". If the file is in a cloud-synced or network folder, make sure ",
-        "the file is available locally, then try again."
-      )
-    )
-  }
-  
-  local_copy
-}
-
-
-# ================================================================
 # LOCAL HELPERS
-# Functions shared across scripts are in R/utils.R.
+# Functions shared across scripts, including prepare_xlsx_for_read(),
+# are in R/utils.R.
 # ================================================================
 
 first_text <- function(x) {
@@ -286,6 +204,23 @@ empty_candidate <- function() {
 # ================================================================
 # 1. OPENALEX CACHE
 # ================================================================
+#
+# OpenAlex responses are saved to the cache file set in config.R and
+# reused on later runs, so repeating the workflow does not repeat every
+# request. Each entry records when it was fetched, and oa_cached() below
+# reuses an entry only while it is younger than cache_max_age_days
+# (config.R). Older entries are requested again, because OpenAlex keeps
+# indexing new papers and a cached answer goes out of date.
+#
+# Only successful responses are cached, so a rate-limited or failed
+# request is never stored as an empty answer. If a re-fetch fails, the
+# expired copy is reused and a warning is issued.
+#
+# A cache file written before entries carried a fetch time still loads;
+# its entries count as expired and are refreshed once, after which they
+# are stored in the current format. Deleting the cache file forces a
+# complete re-fetch.
+# ================================================================
 
 if (
   file.exists(
@@ -364,12 +299,39 @@ oa_cached <- function(
     fun
 ) {
   
-  if (
-    key %in%
-    names(
-      oa_cache[[section]]
+  entry <- oa_cache[[section]][[key]]
+  
+  
+  # cache_max_age_days is set in config.R. The default covers an older
+  # config.R that predates this setting.
+  max_age_days <- get0(
+    "cache_max_age_days",
+    ifnotfound = 60,
+    inherits = TRUE
+  )
+  
+  
+  # Entries are stored as list(fetched = <time>, value = <result>).
+  # Anything else came from a cache file written before expiry existed,
+  # has no fetch time, and is therefore treated as expired.
+  timestamped <- is.list(entry) &&
+    !is.data.frame(entry) &&
+    all(
+      c("fetched", "value") %in% names(entry)
     )
-  ) {
+  
+  
+  fresh <- timestamped &&
+    as.numeric(
+      difftime(
+        Sys.time(),
+        entry$fetched,
+        units = "days"
+      )
+    ) < max_age_days
+  
+  
+  if (fresh) {
     
     cat(
       "OpenAlex CACHE: ",
@@ -380,7 +342,20 @@ oa_cached <- function(
     
     
     return(
-      oa_cache[[section]][[key]]
+      entry$value
+    )
+  }
+  
+  
+  if (
+    !is.null(entry)
+  ) {
+    
+    cat(
+      "OpenAlex CACHE EXPIRED, re-fetching: ",
+      key,
+      "\n",
+      sep = ""
     )
   }
   
@@ -394,13 +369,40 @@ oa_cached <- function(
     )
   ) {
     
-    oa_cache[[section]][[key]] <<-
-      ans$result
+    oa_cache[[section]][[key]] <<- list(
+      fetched = Sys.time(),
+      value = ans$result
+    )
     
     
     saveRDS(
       oa_cache,
       cache_file
+    )
+    
+    
+    return(
+      ans$result
+    )
+  }
+  
+  
+  # The request failed. An out-of-date answer is more useful than an
+  # empty one, so reuse the expired copy and say so.
+  if (
+    !is.null(entry)
+  ) {
+    
+    warning(
+      "OpenAlex request failed for ",
+      key,
+      ". Using the expired cached copy.",
+      call. = FALSE
+    )
+    
+    
+    return(
+      if (timestamped) entry$value else entry
     )
   }
   
@@ -519,7 +521,8 @@ cat(
 )
 
 data_registry_local <- prepare_xlsx_for_read(
-  data_registry_file
+  data_registry_file,
+  created_by = "R/01_get_dataset_dois.R"
 )
 
 cat(

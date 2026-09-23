@@ -9,7 +9,7 @@
 # DATASET SOURCES:
 # 1. EDI: all revisions with DOIs in the configured EDI scope.
 # 2. Zotero: datasets archived outside EDI that are represented in the
-#    configured readable Zotero group and carry external_tag. The default
+#    configured readable Zotero group and carry zotero_dataset_tag. The default
 #    BLE configuration uses this Zotero convention; other sites may leave
 #    the Zotero settings blank and build the registry from EDI only.
 #
@@ -20,7 +20,7 @@
 # CONFIGURATION:
 # Edit config.R. The two sources are independent of each other:
 #   EDI    needs edi_scope (config.R) and EDI_API_KEY (.Renviron).
-#   Zotero needs zotero_group_id and external_tag (config.R).
+#   Zotero needs zotero_group_id and zotero_dataset_tag (config.R).
 # At least one source must be configured. If one of them is incomplete,
 # this script warns, skips that source, and builds the registry from the
 # other one. If both are incomplete, it stops and lists what is needed.
@@ -108,39 +108,8 @@ has_edi_key <- is_configured(edi_key)
 has_edi <- has_edi_scope && has_edi_key
 
 has_zotero_group <- is_configured(zotero_group_id)
-has_external_tag <- is_configured(external_tag)
-has_zotero <- has_zotero_group && has_external_tag
-
-# Explain exactly which EDI setting is missing, because the scope lives in
-# config.R and the key lives in .Renviron.
-if (!has_edi) {
-  missing_edi <- c(
-    if (!has_edi_scope) "edi_scope (set it in config.R)",
-    if (!has_edi_key) "EDI_API_KEY (add it to .Renviron and restart R)"
-  )
-
-  cat(
-    "\nEDI harvesting will be SKIPPED. Missing: ",
-    paste(missing_edi, collapse = "; "),
-    "\n",
-    sep = ""
-  )
-}
-
-if (!has_zotero) {
-  missing_zotero <- c(
-    if (!has_zotero_group) "zotero_group_id",
-    if (!has_external_tag) "external_tag"
-  )
-
-  cat(
-    "\nZotero harvesting of externally archived datasets will be SKIPPED. ",
-    "Missing in config.R: ",
-    paste(missing_zotero, collapse = ", "),
-    "\n",
-    sep = ""
-  )
-}
+has_zotero_dataset_tag <- is_configured(zotero_dataset_tag)
+has_zotero <- has_zotero_group && has_zotero_dataset_tag
 
 if (!has_edi && !has_zotero) {
   stop(
@@ -149,7 +118,7 @@ if (!has_edi && !has_zotero) {
       "Provide at least one of the following in config.R:\n",
       "  - edi_scope (for example \"knb-lter-ble\"), together with ",
       "EDI_API_KEY in .Renviron; and/or\n",
-      "  - zotero_group_id and external_tag, to collect datasets that are ",
+      "  - zotero_group_id and zotero_dataset_tag, to collect datasets that are ",
       "archived outside EDI.\n",
       "See README.md for setup instructions. Sites that archive datasets ",
       "elsewhere can also create Data_Registry.xlsx by hand and go ",
@@ -159,16 +128,39 @@ if (!has_edi && !has_zotero) {
   )
 }
 
+# One warning per skipped source. Name exactly which setting is missing,
+# because the EDI scope lives in config.R while the key lives in .Renviron.
+
 if (!has_edi) {
+  missing_edi <- c(
+    if (!has_edi_scope) "edi_scope (set it in config.R)",
+    if (!has_edi_key) "EDI_API_KEY (add it to .Renviron and restart R)"
+  )
+
   warning(
-    "EDI settings are incomplete. Building the registry from Zotero only.",
+    paste0(
+      "EDI harvesting SKIPPED, so the registry is built from Zotero only. ",
+      "Missing: ",
+      paste(missing_edi, collapse = "; "),
+      "."
+    ),
     call. = FALSE
   )
 }
 
 if (!has_zotero) {
+  missing_zotero <- c(
+    if (!has_zotero_group) "zotero_group_id",
+    if (!has_zotero_dataset_tag) "zotero_dataset_tag"
+  )
+
   warning(
-    "Zotero settings are incomplete. Building the registry from EDI only.",
+    paste0(
+      "Zotero harvesting of externally archived datasets SKIPPED, so the ",
+      "registry is built from EDI only. Missing in config.R: ",
+      paste(missing_zotero, collapse = ", "),
+      "."
+    ),
     call. = FALSE
   )
 }
@@ -266,7 +258,7 @@ if (has_edi) {
 # 3. HARVEST EXTERNALLY ARCHIVED DATASETS FROM ZOTERO
 # ================================================================
 #
-# The default BLE configuration uses a Zotero tag (external_tag) to mark
+# The default BLE configuration uses a Zotero tag (zotero_dataset_tag) to mark
 # datasets that the site funded or used but that are archived somewhere
 # other than EDI. The request below is unauthenticated, so the Zotero
 # group must be readable through the Zotero API for this to work.
@@ -281,14 +273,13 @@ if (has_zotero) {
     "========================================\n"
   )
   
+  # The tag goes to Zotero as a query parameter, so this is a server-side
+  # filter: the API returns only the tagged items. The request does not
+  # download the whole group library to filter it here, and the
+  # pagination inside paginate_json() only pages through tagged items.
   external_items <- paginate_json(
-    paste0(
-      "https://api.zotero.org/groups/",
-      zotero_group_id,
-      "/items/top"
-    ),
-    list(tag = external_tag),
-    user_agent = "LTER-dataset-registry"
+    zotero_group_url("/items/top"),
+    list(tag = zotero_dataset_tag)
   )
   
   zotero_registry <- purrr::map_dfr(
@@ -299,8 +290,7 @@ if (has_zotero) {
       possible <- extract_dois(
         paste(
           safe(d$DOI, ""),
-          safe(d$url, ""),
-          safe(d$extra, "")
+          safe(d$url, "")
         )
       )
       
@@ -320,7 +310,7 @@ if (has_zotero) {
         Package_ID = NA_character_,
         Dataset_DOI = doi,
         Registry_Source = "Zotero",
-        Registry_Category = external_tag,
+        Registry_Category = zotero_dataset_tag,
         Zotero_Item_Key = safe(item$key)
       )
     }
@@ -392,8 +382,8 @@ if (nrow(data_registry) == 0) {
   warning(
     paste0(
       "The dataset registry is empty. The configured source(s) returned no ",
-      "dataset DOIs. Check edi_scope, and the Zotero group and external_tag, ",
-      "in config.R."
+      "dataset DOIs. Check edi_scope, zotero_group_id, and ",
+      "zotero_dataset_tag in config.R."
     ),
     call. = FALSE
   )

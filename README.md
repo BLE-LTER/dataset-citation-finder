@@ -1,6 +1,10 @@
 # Dataset Citation Finder
 
+An R workflow for listing LTER datasets and associated publications.
+
 Last updated: 2026-09-18
+
+Originally created by the Beaufort Lagoon Ecosystems (BLE) LTER.
 
 ## Overview
 
@@ -10,10 +14,28 @@ datasets. It combines dataset information from the Environmental Data Initiative
 (EDI) and, optionally, Zotero with publication evidence from DataCite and
 OpenAlex. When an OpenAlex keyword search returns a paper with an accessible PDF,
 the workflow can also search the extracted PDF text for site terms and for exact
-dataset references.
+dataset references. The workflow helps answer these questions:
+
+1. What are the DOIs of my LTER site's datasets?
+2. Which papers cite my data?
+3. Are linkages between papers and my cited data set up in EDI and/or Zotero?
 
 Everything the workflow produces is evidence for a person to review. The scripts
 never add, change, or delete records in EDI or Zotero.
+
+A note on Zotero: BLE uses Zotero in a couple of ways that not all LTER sites 
+follow. Uses can leave Zotero configuration parameters blank if they do not
+use Zotero in this way. The two ways are:
+
+1. BLE's primary data catalog reads directly from a list of BLE datasets
+   published at EDI. For cases when BLE datasets are archived elsewhere,
+   BLE keeps a Zotero collection listing those datasets with a tag that
+   indicates that this is item is a BLE dataset that is archived elsewhere.
+   Therefore, to a build a complete list of BLE datasets DOIs, one must search
+   both EDI and Zotero.
+2. BLE maintains a collection of its publications in Zotero. To associate
+   publications with BLE datasets, BLE includes the dataset DOI in the
+   `extra` field of Zotero for a given publication item.
 
 ## Repository structure
 
@@ -24,7 +46,7 @@ workflow scripts.
 
 - `config.R` holds all site-specific settings: the EDI scope, the Zotero
   settings, the site search terms, and the output location. It also reads the
-  project `.Renviron` so that API keys are available to every script.
+  project `.Renviron` so that API keys are available to every script more details are given below.
 - `setup.R` installs the R packages the workflow needs. It only has to be run
   once, during initial setup.
 - `R/utils.R` holds the functions shared by more than one script, such as
@@ -34,6 +56,32 @@ workflow scripts.
   numbered scripts source it automatically, so it is never run on its own.
 - `dataset-citation-finder.Rproj` is an RStudio project file. Opening it makes
   the repository root the R working directory, which is what the scripts expect.
+- Create the environment variables because `.Renviron` is not committed, each user has to create their own. From the
+repository root in RStudio, run:
+
+```r
+file.edit(".Renviron")
+```
+
+Add your own values, one per line:
+
+```text
+EDI_API_KEY=your_edi_key
+OPENALEX_API_KEY=your_openalex_key
+```
+
+Save the file and restart R. `config.R` reads the project `.Renviron` itself, so
+the keys are picked up even if the R session was started somewhere other than the
+repository root. Keys set as operating-system environment variables also work.
+
+Confirm the values are loaded without printing the secrets themselves:
+
+```r
+nzchar(Sys.getenv("EDI_API_KEY"))
+nzchar(Sys.getenv("OPENALEX_API_KEY"))
+```
+
+Each should return `TRUE` when configured.
 
 ### Workflow scripts
 
@@ -80,12 +128,12 @@ added to the registry by hand.
 
 ### How the Zotero source works
 
-Using Zotero this way is a BLE convention rather than an LTER-wide requirement. 
-BLE keeps a Zotero **group** whose items include datasets that BLE uses as well as datasets
-created by BLE which are NOT archived at EDI. BLE tags the latter in Zotero with 
-`LTER-Funded Data at Other Archives`. `R/01_get_dataset_dois.R` asks the
-Zotero API for the top-level items in that group carrying that tag, and takes the
-DOI from each item's DOI or URL field.
+Using Zotero this way is a BLE convention rather than an LTER-wide requirement.
+BLE keeps a Zotero **group** whose items include datasets that BLE uses as well
+as datasets created by BLE which are NOT archived at EDI. BLE tags the latter
+in Zotero with `LTER-Funded Data at Other Archives`. `R/01_get_dataset_dois.R` 
+asks the Zotero API for the top-level items in that group carrying that tag, 
+and takes the DOI from each item's DOI or URL field.
 
 Two details matter for another site trying this:
 
@@ -240,35 +288,6 @@ API keys here:
 After creating an OpenAlex account, the key is available at:
 
 <https://openalex.org/settings/api>
-
-### Create the environment variables
-
-Because `.Renviron` is not committed, each user has to create their own. From the
-repository root in RStudio, run:
-
-```r
-file.edit(".Renviron")
-```
-
-Add your own values, one per line:
-
-```text
-EDI_API_KEY=your_edi_key
-OPENALEX_API_KEY=your_openalex_key
-```
-
-Save the file and restart R. `config.R` reads the project `.Renviron` itself, so
-the keys are picked up even if the R session was started somewhere other than the
-repository root. Keys set as operating-system environment variables also work.
-
-Confirm the values are loaded without printing the secrets themselves:
-
-```r
-nzchar(Sys.getenv("EDI_API_KEY"))
-nzchar(Sys.getenv("OPENALEX_API_KEY"))
-```
-
-Each should return `TRUE` when configured.
 
 ## Workflow
 

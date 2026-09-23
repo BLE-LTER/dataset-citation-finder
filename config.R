@@ -43,13 +43,28 @@ edi_scope <- "knb-lter-ble"
 
 zotero_group_id <- "2211939"
 
-# Collection used by the Zotero comparison/publication-list scripts.
-website_collection <- "For-Website"
+# ID of the Zotero collection holding the site's publications, used by
+# 03_compare_zotero.R and 04_create_zotero_publication_list.R. Zotero's
+# API calls this the collection "key"; it is an eight-character code.
+#
+# To find it, open the collection in your Zotero group on the web. The ID
+# is the last part of the address:
+#
+#   https://www.zotero.org/groups/lter-ble/collections/KHTHLKB5
+#                                                      ^^^^^^^^
+#
+# Supplying the ID lets the scripts request the collection directly,
+# instead of listing every collection in the group to match one by name.
+#
+# The value below is the BLE "For-Website" collection. Another site
+# should replace it with the ID of its own publication collection.
+
+zotero_publication_collection_id <- "KHTHLKB5"
 
 # Tag used by 01_get_dataset_dois.R to identify datasets archived outside
 # EDI. BLE uses this tag in its Zotero group; other sites may use a
 # different tag or may leave it blank to skip this Zotero registry source.
-external_tag <- "LTER-Funded Data at Other Archives"
+zotero_dataset_tag <- "LTER-Funded Data at Other Archives"
 
 
 # ------------------------------------------------
@@ -143,6 +158,40 @@ cache_file <- file.path(
   output_dir,
   "openalex_cache.rds"
 )
+
+
+# ------------------------------------------------
+# OPENALEX CACHE EXPIRY
+# ------------------------------------------------
+# 02_find_dataset_citations.R saves each OpenAlex response in the cache
+# file above and reuses it on later runs. A cached response is reused
+# only while it is younger than the number of days below; after that it
+# is requested again.
+#
+# OpenAlex keeps indexing new papers, so a cached answer goes out of
+# date as new work cites a dataset. Lower this number to pick up new
+# citations sooner, raise it to make fewer API requests. Set it to Inf
+# to keep cached responses forever.
+
+cache_max_age_days <- 60
+
+
+# ------------------------------------------------
+# ZOTERO COMPARISON REUSE EXPIRY
+# ------------------------------------------------
+# 04_create_zotero_publication_list.R can skip asking OpenAlex for a
+# cited-by count it can instead read from Zotero_Comparison.xlsx, which
+# 03_compare_zotero.R already saved (see that script's OUTPUT COLUMNS).
+# This is a separate cache from openalex_cache.rds above: it reuses an
+# entire report file rather than individual timestamped responses.
+#
+# Those saved counts are reused only while Zotero_Comparison.xlsx is
+# younger than the number of days below. Once the file is older than
+# that, 04 ignores it and re-fetches every citation count from OpenAlex
+# instead. Set it to Inf to always reuse the existing file, however old
+# it is; set it to 0 to always re-fetch every count.
+
+zotero_comparison_cache_max_age_days <- 30
 
 
 # ------------------------------------------------
