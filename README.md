@@ -2,7 +2,7 @@
 
 An R workflow for listing LTER datasets and associated publications.
 
-Last updated: 2026-09-23
+Last updated: 2026-09-25
 
 Originally created by the Beaufort Lagoon Ecosystems (BLE) LTER.
 
@@ -57,9 +57,11 @@ See below for how to get your API keys.
 ### EDI API key
 
 `EDI_API_KEY` is used by `EDIutils` to authenticate requests that need an EDI
-identity: the EDI registry harvest in script 01 and the journal-citation
-comparison in script 05. Registered EDI users can create access keys in the EDI
-Identity and Access Manager, documented under **Profile Menu > Access Keys**:
+identity: the EDI registry harvest in script 01 and the EDI journal-citation
+retrieval in script 02. Script 05 no longer needs this key itself; it reads
+the journal citations script 02 already retrieved. Registered EDI users can
+create access keys in the EDI Identity and Access Manager, documented under
+**Profile Menu > Access Keys**:
 
 <https://edirepository.org/resources/iam>
 
@@ -140,7 +142,8 @@ of execution:
 1. `01_get_dataset_dois.R` builds the dataset registry by retrieving dataset DOIs
    from EDI and Zotero.
 2. `02_find_dataset_citations.R` searches for publications associated with those
-   datasets and checks available publication full text.
+   datasets and checks available publication full text, and retrieves the journal
+   citations already recorded in EDI.
 3. `03_compare_zotero.R` compares the discovered relationships with the
    publication information already recorded in Zotero.
 4. `04_create_zotero_publication_list.R` creates a comprehensive Zotero
@@ -259,7 +262,9 @@ source("R/02_find_dataset_citations.R")
 ```
 
 Skip `R/05_compare_edi_citations.R`, because that report compares results with
-journal citations recorded in EDI.
+journal citations recorded in EDI.`R/02_find_dataset_citations.R` does not
+need to be skipped: it automatically skips its own EDI retrieval whenever
+`edi_scope` is blank.
 
 ## Before running the workflow
 
@@ -301,7 +306,6 @@ Review the site-specific settings before running any workflow script:
   and the ID is `KHTHLKB5`.
 - `zotero_dataset_tag` - the Zotero tag marking datasets archived outside EDI,
   used by script 01.
-- `publication_types` - the Zotero item types treated as publications.
 - `site_keywords` - site-specific terms used for OpenAlex keyword discovery and
   for searching PDF text.
 - `output_dir` - where generated files are written.
@@ -334,7 +338,14 @@ Sheet `Data_Registry`, sorted by scope, identifier, revision, and dataset title:
 
 Uses the dataset registry to discover paper-dataset relationships through
 DataCite and OpenAlex. Separately, it runs site-keyword searches in OpenAlex and
-checks PDF text for your dataset citations whenever OpenAlex supplies a PDF URL.
+checks PDF text for your dataset citations whenever OpenAlex supplies a PDF URL. 
+It also retrieves the journal citations EDI already has on file for each
+dataset series, when `edi_scope` (config.R) is set.
+
+The script also looks up the publication type for each unique paper DOI in the final 
+relationship table using Crossref. This helps distinguish publication types such as 
+journal articles, preprints, conference papers, book chapters, books, and dissertations.
+If Crossref does not return metadata for a DOI, the publication type is left blank.
 
 As the code executes, do not be alarmed if you see "PDF error" messages. This just means the code could
 not read the PDF due to some issue with it, so it will skip it and continue to
@@ -414,10 +425,15 @@ The possible `PDF_Status` values are `No direct OA PDF URL`,
 #### Sheet: `Final_Relationships`
 
 The combined, deduplicated paper-dataset relationship table used by the
-comparison scripts, 03 and 05. It contains the API and metadata relationships
-plus any additional exact relationships confirmed through PDF verification. Its
+comparison scripts, 03 and 05. It contains the API and metadata relationships,
+any additional exact relationships confirmed through PDF verification, and any
+`EDI_Citations` records that have both a paper DOI and a dataset DOI. Its
 columns are `Dataset_DOI`, `Paper_DOI`, `Paper_Title`, `Year`, and `Found_By`,
-where `Found_By` records the evidence behind the relationship.
+where `Found_By` records the evidence behind the relationship, including
+`EDI: Journal citation` when EDI already had the pair on file. Publication_Type 
+is retrieved from Crossref using the paper DOI and identifies the type of publication, 
+such as Journal Article, Preprint, Conference Paper, Book Chapter, Book, or Dissertation. 
+If Crossref does not return publication-type metadata for a DOI, Publication_Type is left blank.
 
 `Final_Relationships` can legitimately have more rows than `Publication_Search`.
 If `Publication_Search` has fewer rows than `Final_Relationships`, the extra
@@ -437,7 +453,7 @@ Skip this if you do not use Zotero for cataloging your site's publications.
 
 **Output:** `Citation_finder_output/Zotero_Comparison.xlsx`
 
-- `Zotero_For_Website` - the publications currently in the configured Zotero
+- `Zotero_Publications` - the publications currently in the configured Zotero
   collection, with item key, paper DOI, title and type, the dataset DOI evidence
   found in the Extra field, and the cited-by count.
 - `Missing_From_Zotero` - a publication DOI that Citation Finder found and that is
@@ -475,10 +491,14 @@ Sheet `Zotero_Publications`:
 ### 5. `R/05_compare_edi_citations.R`
 
 The dataset landing page in EDI can include journal articles that cite the data.
-This part of the workflow retrieves the journal citations recorded in EDI and compares exact
-`dataset series + paper DOI` relationships with Citation Finder results. It does
-not create or modify EDI journal citations. Use these results to
-identify where to update associated journal articles for datasets in EDI.
+This part of the workflow compares those journal citations with exact
+`dataset series + paper DOI` relationships from Citation Finder results. It
+reads the journal citations from the `EDI_Citations` sheet that
+`R/02_find_dataset_citations.R` already retrieved, rather than querying EDI
+again, so `EDI_API_KEY` is not needed to run this script - only `edi_scope`
+(config.R). Rerun `R/02_find_dataset_citations.R` first if EDI's journal
+citation data needs to be refreshed. It does not create or modify EDI journal citations. 
+Use these results to identify where to update associated journal articles for datasets in EDI.
 Results may also indicate dataset-paper relationships that were already set
 in EDI, but were not found by Dataset Citation Finder in the previous steps.
 
@@ -505,6 +525,12 @@ The `EDI_Status` values are:
   Citation Finder did not find the same dataset and paper DOI relationship. EDI
   citations with no paper DOI also get this status, because they cannot be matched
   automatically by DOI.
+
+Because `R/02_find_dataset_citations.R` already folds EDI citations that have
+a paper DOI into `Final_Relationships`, most of those now show up as
+`Already in EDI` instead. Only EDI citations with no paper DOI - which cannot
+be added to `Final_Relationships` - should still appear as
+`In EDI - Not in Citation Finder` under normal circumstances.
 
 ## Recommended run order
 

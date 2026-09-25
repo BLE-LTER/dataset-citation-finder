@@ -29,7 +29,7 @@
 # OUTPUT:
 # Zotero_Comparison.xlsx, written to the directory set by output_dir in
 # config.R (by default Citation_finder_output in the repository root).
-#   Zotero_For_Website       - publications currently in the configured
+#   Zotero_Publications      - publications currently in the configured
 #                              Zotero collection.
 #   Missing_From_Zotero      - papers found by Citation Finder whose paper
 #                              DOI is not in the Zotero collection.
@@ -220,7 +220,13 @@ if (!length(fw_items)) {
 # 3. ZOTERO PUBLICATION ITEMS
 # ================================================================
 
-# Publication types are defined in config.R.
+# Every item in the configured collection is treated as a publication
+# automatically - the collection itself is the curated list of
+# publications, so there is no publication_types setting in config.R
+# to keep in sync with Zotero's item type names. The only items
+# skipped are standalone Notes or Attachments, which are not
+# publications, in case either is ever added to the collection
+# directly rather than as a child of a real item.
 
 zotero_publications <- purrr::map_dfr(
   
@@ -231,10 +237,10 @@ zotero_publications <- purrr::map_dfr(
     d <- item$data
     
     if (
-      !safe(
+      safe(
         d$itemType
       ) %in%
-      publication_types
+      c("note", "attachment")
     ) {
       return(tibble::tibble())
     }
@@ -331,7 +337,7 @@ paper_citation_counts <- purrr::map_dfr(
     Paper_DOI,
     .keep_all = TRUE
   )
-  
+
 
 
 zotero_publications <- zotero_publications %>%
@@ -347,10 +353,10 @@ zotero_publications <- zotero_publications %>%
 
 
 # ================================================================
-# 5. ZOTERO FOR-WEBSITE TAB
+# 5. ZOTERO PUBLICATIONS TAB
 # ================================================================
 
-zotero_for_website <- zotero_publications %>%
+zotero_publications_tab <- zotero_publications %>%
   
   dplyr::rowwise() %>%
   
@@ -681,8 +687,8 @@ zotero_not_in_search <- zotero_dataset_evidence %>%
 # ================================================================
 
 sheets <- list(
-  Zotero_For_Website =
-    zotero_for_website,
+  Zotero_Publications =
+    zotero_publications_tab,
   Missing_From_Zotero =
     missing_from_zotero,
   Zotero_Missing_Data_DOI =
@@ -768,7 +774,7 @@ cat(
   "ZOTERO COMPARISON COMPLETE\n",
   "========================================\n",
   "Configured Zotero publications: ",
-  nrow(zotero_for_website),
+  nrow(zotero_publications_tab),
   "\n",
   "Publications completely missing from Zotero: ",
   nrow(missing_from_zotero),

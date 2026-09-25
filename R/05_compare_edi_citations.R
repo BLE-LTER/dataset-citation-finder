@@ -13,12 +13,12 @@
 # Read from the directory set by output_dir in config.R:
 #   Data_Registry.xlsx, created by R/01_get_dataset_dois.R.
 #   Publication_Search_Results.xlsx, created by
-#     R/02_find_dataset_citations.R.
-# EDI settings from config.R and EDI_API_KEY from .Renviron.
-#
-# EDI API KEY:
-# EDI_API_KEY authenticates EDIutils requests used to retrieve journal
-# citations from EDI. Store the key in .Renviron, not in this script.
+#     R/02_find_dataset_citations.R. Its EDI_Citations sheet holds the
+#     journal citations recorded in EDI; this script reads that sheet
+#     instead of querying EDI itself. Rerun R/02_find_dataset_citations.R
+#     to refresh EDI journal citation data.
+# EDI settings from config.R (edi_scope). No EDI API key is needed here;
+# EDI_API_KEY is only used by R/02_find_dataset_citations.R.
 #
 # OUTPUT:
 # EDI_Journal_Citation_Comparison.xlsx, written to the directory set by
@@ -80,19 +80,6 @@ if (is.null(edi_scope) || !nzchar(trimws(edi_scope))) {
     call. = FALSE
   )
 }
-
-if (is.null(edi_key) || !nzchar(trimws(edi_key))) {
-  stop(
-    paste0(
-      "EDI_API_KEY could not be found. Add it to .Renviron and restart R.\n",
-      "See README.md for setup instructions."
-    ),
-    call. = FALSE
-  )
-}
-
-cat("EDI API key loaded successfully.\n")
-
 
 # ================================================================
 # LOCAL HELPERS
@@ -286,215 +273,59 @@ print(
 
 
 # ================================================================
-# 4. LOGIN TO EDI
+# 4. READ EDI JOURNAL CITATIONS FROM PUBLICATION SEARCH RESULTS
+# ================================================================
+#
+# R/02_find_dataset_citations.R already queries EDI once and saves
+# every dataset series' journal citations in the EDI_Citations sheet
+# of Publication_Search_Results.xlsx. Reading that sheet here, instead
+# of logging in to EDI and querying it again, avoids repeating the
+# same request a second time.
+#
+# Rerun R/02_find_dataset_citations.R first if EDI journal citation
+# data needs to be refreshed; this script no longer queries EDI
+# itself.
 # ================================================================
 
 cat(
   "\n========================================\n",
-  "LOGGING INTO EDI\n",
+  "READING EDI JOURNAL CITATIONS\n",
   "========================================\n"
 )
 
 
-EDIutils::login(
-  key = edi_key
+publication_results_sheets <- openxlsx::getSheetNames(
+  publication_results_local
+)
+
+
+if (!"EDI_Citations" %in% publication_results_sheets) {
+  stop(
+    paste0(
+      'Publication_Search_Results.xlsx does not contain an "EDI_Citations" ',
+      "sheet. Rerun R/02_find_dataset_citations.R first; it retrieves EDI ",
+      "journal citations and saves them to that sheet.\nAvailable sheets: ",
+      paste(
+        publication_results_sheets,
+        collapse = ", "
+      )
+    ),
+    call. = FALSE
+  )
+}
+
+
+edi_citations_raw <- openxlsx::read.xlsx(
+  publication_results_local,
+  sheet = "EDI_Citations"
 )
 
 
 cat(
-  "EDI login complete.\n"
-)
-
-
-# ================================================================
-# 5. GET JOURNAL CITATIONS FROM EDI
-#
-# EDIutils::list_data_package_citations() already returns the fields
-# we need:
-#   journalCitationId
-#   packageId
-#   articleDoi
-#   articleTitle
-#   articleUrl
-#
-# We therefore use those columns directly.
-# ================================================================
-
-cat(
-  "
-========================================
-",
-  "GETTING EDI JOURNAL CITATIONS
-",
-  "========================================
-"
-)
-
-
-edi_citations_raw <- purrr::map_dfr(
-  
-  seq_len(
-    nrow(
-      edi_series
-    )
-  ),
-  
-  function(i) {
-    
-    dataset_series_id <-
-      edi_series$Dataset_Series_ID[i]
-    
-    query_package_id <-
-      edi_series$Query_Package_ID[i]
-    
-    dataset_title <-
-      edi_series$Dataset_Title[i]
-    
-    
-    cat(
-      "[",
-      i,
-      "/",
-      nrow(edi_series),
-      "] ",
-      query_package_id,
-      "
-",
-sep = ""
-    )
-    
-    
-    citations <- tryCatch(
-      
-      EDIutils::list_data_package_citations(
-        packageId = query_package_id,
-        as = "data.frame",
-        list_all = TRUE,
-        env = "production"
-      ),
-      
-      error = function(e) {
-        
-        message(
-          "Could not retrieve citations for ",
-          query_package_id,
-          ": ",
-          conditionMessage(e)
-        )
-        
-        NULL
-      }
-    )
-    
-    
-    if (
-      is.null(citations) ||
-      nrow(citations) == 0
-    ) {
-      
-      return(
-        tibble::tibble(
-          Dataset_Series_ID = character(),
-          EDI_Package_ID = character(),
-          Dataset_Title = character(),
-          EDI_Citation_ID = character(),
-          Paper_DOI = character(),
-          EDI_Paper_Title = character(),
-          EDI_Article_URL = character()
-        )
-      )
-    }
-    
-    
-    required_cols <- c(
-      "journalCitationId",
-      "packageId",
-      "articleDoi",
-      "articleTitle",
-      "articleUrl"
-    )
-    
-    
-    missing_cols <- setdiff(
-      required_cols,
-      names(citations)
-    )
-    
-    
-    if (length(missing_cols) > 0) {
-      
-      stop(
-        paste0(
-          "EDI citation response is missing expected column(s): ",
-          paste(
-            missing_cols,
-            collapse = ", "
-          ),
-          "
-Returned columns were: ",
-          paste(
-            names(citations),
-            collapse = ", "
-          )
-        )
-      )
-    }
-    
-    
-    citations %>%
-      dplyr::transmute(
-        
-        Dataset_Series_ID =
-          dataset_series_id,
-        
-        EDI_Package_ID =
-          as.character(
-            packageId
-          ),
-        
-        Dataset_Title =
-          dataset_title,
-        
-        EDI_Citation_ID =
-          as.character(
-            journalCitationId
-          ),
-        
-        Paper_DOI =
-          clean_doi(
-            articleDoi
-          ),
-        
-        EDI_Paper_Title =
-          dplyr::na_if(
-            trimws(
-              as.character(
-                articleTitle
-              )
-            ),
-            ""
-          ),
-        
-        EDI_Article_URL =
-          dplyr::na_if(
-            trimws(
-              as.character(
-                articleUrl
-              )
-            ),
-            ""
-          )
-      )
-  }
-)
-
-
-cat(
-  "
-EDI citation records retrieved:",
+  "EDI citation records read from Publication_Search_Results.xlsx: ",
   nrow(edi_citations_raw),
-  "
-"
+  "\n",
+  sep = ""
 )
 
 
@@ -505,8 +336,7 @@ cat(
       edi_citations_raw$Paper_DOI
     )
   ),
-  "
-"
+  "\n"
 )
 
 
@@ -517,8 +347,7 @@ cat(
       edi_citations_raw$Paper_DOI
     )
   ),
-  "
-"
+  "\n"
 )
 
 
@@ -527,9 +356,7 @@ if (
 ) {
   
   cat(
-    "
-Example EDI citations retrieved:
-"
+    "\nExample EDI citations read:\n"
   )
   
   print(
@@ -546,16 +373,6 @@ Example EDI citations retrieved:
       )
   )
 }
-
-
-# ================================================================
-# 6. LOGOUT OF EDI
-# ================================================================
-
-try(
-  EDIutils::logout(),
-  silent = TRUE
-)
 
 
 # Keep ALL EDI citation records, including records without a DOI.
@@ -580,16 +397,13 @@ edi_citations <- edi_citations_raw %>%
 
 
 cat(
-  "
-EDI journal citation records:",
+  "\nEDI journal citation records:",
   nrow(edi_citations),
-  "
-"
+  "\n"
 )
 
-
 # ================================================================
-# 7. READ PUBLICATION SEARCH RESULTS
+# 5. READ PUBLICATION SEARCH RESULTS
 # ================================================================
 
 cat(
@@ -659,7 +473,7 @@ cat(
 
 
 # ================================================================
-# 8. STANDARDIZE PUBLICATION SEARCH
+# 6. STANDARDIZE PUBLICATION SEARCH
 # ================================================================
 
 publication_search <- publication_search %>%
@@ -701,7 +515,7 @@ publication_search <- publication_search %>%
 
 
 # ================================================================
-# 9. STANDARDIZE OPTIONAL COLUMNS
+# 7. STANDARDIZE OPTIONAL COLUMNS
 # ================================================================
 
 if (
@@ -747,7 +561,7 @@ if (
 
 
 # ================================================================
-# 10. ONE ROW PER PAPER-DATASET RELATIONSHIP
+# 8. ONE ROW PER PAPER-DATASET RELATIONSHIP
 # ================================================================
 
 publication_relationships <- publication_search %>%
@@ -763,7 +577,7 @@ publication_relationships <- publication_search %>%
 
 
 # ================================================================
-# 11. COMPARE WITH EDI
+# 9. COMPARE WITH EDI
 #
 # IMPORTANT:
 # Match on BOTH:
@@ -830,7 +644,7 @@ comparison <- publication_relationships %>%
 
 
 # ================================================================
-# 12. ALSO INCLUDE EDI CITATIONS THAT WERE NOT FOUND BY
+# 10. ALSO INCLUDE EDI CITATIONS THAT WERE NOT FOUND BY
 #     PUBLICATION SEARCH
 #
 # This includes:
@@ -860,14 +674,35 @@ edi_only <- edi_citations %>%
     
     edi_registry %>%
       dplyr::select(
-        Package_ID,
-        Dataset_DOI
+        Dataset_Series_ID,
+        Registry_Dataset_DOI = Dataset_DOI
       ) %>%
-      dplyr::distinct(),
+      dplyr::group_by(
+        Dataset_Series_ID
+      ) %>%
+      dplyr::summarise(
+        
+        Registry_Dataset_DOI =
+          dplyr::first(
+            Registry_Dataset_DOI[
+              !is.na(Registry_Dataset_DOI) &
+                Registry_Dataset_DOI != ""
+            ]
+          ),
+        
+        .groups = "drop"
+      ),
     
-    by = c(
-      "EDI_Package_ID" = "Package_ID"
-    )
+    by = "Dataset_Series_ID"
+  ) %>%
+  dplyr::mutate(
+    
+    Dataset_DOI =
+      dplyr::coalesce(
+        Dataset_DOI,
+        Registry_Dataset_DOI
+      )
+    
   ) %>%
   dplyr::transmute(
     
@@ -893,7 +728,7 @@ edi_only <- edi_citations %>%
 
 
 # ================================================================
-# 13. FINAL ONE-SHEET TABLE
+# 11. FINAL ONE-SHEET TABLE
 # ================================================================
 
 final_comparison <- dplyr::bind_rows(
@@ -938,7 +773,7 @@ final_comparison <- dplyr::bind_rows(
     Paper_Title
   )
 # ================================================================
-# 14. SUMMARY
+# 12. SUMMARY
 # ================================================================
 
 cat(
@@ -989,7 +824,7 @@ cat(
 
 
 # ================================================================
-# 15. CREATE EXCEL WORKBOOK
+# 13. CREATE EXCEL WORKBOOK
 # ================================================================
 
 wb <- openxlsx::createWorkbook()
@@ -1009,7 +844,7 @@ openxlsx::writeData(
 
 
 # ================================================================
-# 16. FORMAT EXCEL
+# 14. FORMAT EXCEL
 # ================================================================
 
 header_style <- openxlsx::createStyle(
@@ -1081,7 +916,7 @@ openxlsx::addFilter(wb,sheet = "EDI_Citation_Comparison",
 
 
 # ================================================================
-# 17. SAVE
+# 15. SAVE
 # ================================================================
 
 openxlsx::saveWorkbook(wb,edi_journal_citation_file,overwrite =TRUE)

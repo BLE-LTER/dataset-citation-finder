@@ -70,17 +70,16 @@ zotero_dataset_tag <- "LTER-Funded Data at Other Archives"
 # ------------------------------------------------
 # PUBLICATION TYPES INCLUDED FROM ZOTERO
 # ------------------------------------------------
-
-publication_types <- c(
-  "journalArticle",
-  "conferencePaper",
-  "bookSection",
-  "preprint",
-  "report",
-  "thesis",
-  "patent",
-  "book"
-)
+# There is nothing to set here. 03_compare_zotero.R and
+# 04_create_zotero_publication_list.R automatically treat every item in
+# zotero_publication_collection_id as a publication - that collection
+# is already the curated list of publications, so there is no separate
+# type list to maintain here, and no Zotero item-type names to look up.
+#
+# The only items those scripts skip are standalone Notes or
+# Attachments, since those are never publications; that exclusion is
+# fixed in the scripts themselves and does not need to be configured
+# here.
 
 
 # ------------------------------------------------

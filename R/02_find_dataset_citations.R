@@ -21,6 +21,13 @@
 # The script can attempt keyless requests when no key is available, but
 # results may be incomplete if OpenAlex rate limits are reached.
 #
+# EDI API KEY:
+# EDI_API_KEY authenticates the EDIutils request used to retrieve journal
+# citations recorded in EDI (see "EDI JOURNAL CITATIONS" below). Only
+# required when edi_scope (config.R) is set; a site that does not archive
+# datasets in EDI can leave edi_scope blank and skip this entirely. Store
+# the key in .Renviron, not in this script.
+#
 # OUTPUTS:
 # Both files are written to the directory set by output_dir in config.R
 # (by default Citation_finder_output in the repository root).
@@ -29,9 +36,15 @@
 #   Publication_Search  - metadata/API-discovered paper-dataset pairs.
 #   PDF_Results         - papers discovered by site-keyword searches that
 #                         were checked for an available PDF/full text.
-#   Final_Relationships - union of Publication_Search relationships and
+#   EDI_Citations       - journal citations recorded in EDI for each
+#                         dataset series (only when edi_scope is set).
+#                         R/05_compare_edi_citations.R reads this sheet
+#                         instead of querying EDI itself.
+#   Final_Relationships - union of Publication_Search relationships,
 #                         additional exact dataset references confirmed
-#                         during PDF verification.
+#                         during PDF verification, and EDI_Citations
+#                         records that have both a paper DOI and a
+#                         dataset DOI.
 #
 # openalex_cache.rds
 #   Saved OpenAlex responses, reused on later runs to avoid repeating
@@ -48,11 +61,17 @@
 # return a paper as a PDF candidate. Matched_Site_Keyword is a configured
 # site term actually found in the extracted PDF text. These can differ.
 #
+# In Final_Relationships, Found_By records every source that supplied a
+# relationship, including "EDI: Journal citation" when EDI already
+# recorded the paper-dataset pair.
+#
 # WHY FINAL_RELATIONSHIPS CAN HAVE MORE ROWS:
 # Publication_Search contains API/metadata discoveries. PDF verification
-# can confirm an exact paper-dataset relationship that those API searches
-# did not return, so Final_Relationships may legitimately contain more rows.
-# The script reports how many relationships were added only by PDF checking.
+# and EDI's own recorded journal citations can each confirm a
+# paper-dataset relationship that the API searches did not return, so
+# Final_Relationships may legitimately contain more rows. The script
+# reports how many relationships were added only by PDF checking and how
+# many were added only from EDI.
 #
 # FILE BEHAVIOR:
 # The output directory is defined in config.R. If it does not exist,
@@ -199,7 +218,70 @@ empty_candidate <- function() {
       character()
   )
 }
-
+get_publication_type <- function(paper_doi) {
+  
+  if (is.na(paper_doi) || paper_doi == "") {
+    return(NA_character_)
+  }
+  
+  r <- get_json(
+    paste0(
+      "https://api.crossref.org/works/",
+      URLencode(
+        paper_doi,
+        reserved = TRUE
+      )
+    )
+  )
+  
+  # Crossref request failed
+  if (!r$ok) {
+    return(NA_character_)
+  }
+  
+  # Safely retrieve publication type
+  publication_type <- tryCatch(
+    r$data$message$type,
+    error = function(e) NA_character_
+  )
+  
+  # Handle missing type
+  if (
+    is.null(publication_type) ||
+    length(publication_type) == 0 ||
+    is.na(publication_type[1]) ||
+    publication_type[1] == ""
+  ) {
+    return(NA_character_)
+  }
+  
+  publication_type <- publication_type[1]
+  
+  # Convert Crossref type to readable label
+  dplyr::case_when(
+    
+    publication_type == "journal-article" ~
+      "Journal Article",
+    
+    publication_type == "posted-content" ~
+      "Preprint",
+    
+    publication_type == "proceedings-article" ~
+      "Conference Paper",
+    
+    publication_type == "book-chapter" ~
+      "Book Chapter",
+    
+    publication_type == "book" ~
+      "Book",
+    
+    publication_type == "dissertation" ~
+      "Dissertation",
+    
+    TRUE ~
+      publication_type
+  )
+}
 
 # ================================================================
 # 1. OPENALEX CACHE
@@ -2628,19 +2710,377 @@ pdf_confirmed <- pdf_results %>%
 
 
 # ================================================================
-# 21. OUTPUT SHEET: FINAL_RELATIONSHIPS
+# 21. EDI JOURNAL CITATIONS
 # ================================================================
 #
-# Combines the API/metadata relationships with the exact relationships
-# confirmed in PDF text, deduplicated to one row per dataset-paper pair.
-# This is the table the comparison scripts (03 and 05) read.
+# EDI records journal citations for each dataset series on its own,
+# independently of the DataCite/OpenAlex/PDF discovery above.
+# Retrieving them here - instead of only in
+# R/05_compare_edi_citations.R - means a citation EDI already knows
+# about is included in Final_Relationships even when DataCite,
+# OpenAlex, and PDF verification all miss it, and it saves 05 from
+# repeating this same EDI query.
+#
+# Skipped entirely when edi_scope is blank (config.R): a site that
+# does not archive its datasets in EDI has no EDI journal citations to
+# add.
+# ================================================================
+
+edi_citations <- tibble(
+  Dataset_Series_ID = character(),
+  EDI_Package_ID = character(),
+  Dataset_Title = character(),
+  EDI_Citation_ID = character(),
+  Paper_DOI = character(),
+  EDI_Paper_Title = character(),
+  EDI_Article_URL = character(),
+  Dataset_DOI = character()
+)
+
+if (is.null(edi_scope) || !nzchar(trimws(edi_scope))) {
+  
+  cat(
+    "\nedi_scope is blank in config.R; skipping EDI journal citations.\n"
+  )
+  
+} else {
+  
+  if (is.null(edi_key) || !nzchar(trimws(edi_key))) {
+    stop(
+      paste0(
+        "EDI_API_KEY could not be found, but edi_scope is set in config.R. ",
+        "Add EDI_API_KEY to .Renviron and restart R, or set edi_scope to \"\" ",
+        "if this site does not archive datasets in EDI.\nSee README.md."
+      ),
+      call. = FALSE
+    )
+  }
+  
+  cat(
+    "\n========================================\n",
+    "GETTING EDI JOURNAL CITATIONS\n",
+    "========================================\n"
+  )
+  
+  edi_registry <- master_data_registry %>%
+    
+    filter(
+      Scope == edi_scope
+    ) %>%
+    
+    mutate(
+      Dataset_Series_ID =
+        paste0(
+          Scope,
+          ".",
+          Identifier
+        )
+    ) %>%
+    
+    select(
+      Dataset_Series_ID,
+      Package_ID,
+      Dataset_DOI,
+      Dataset_Title
+    )
+  
+  edi_series <- edi_registry %>%
+    
+    group_by(
+      Dataset_Series_ID
+    ) %>%
+    
+    summarise(
+      
+      Query_Package_ID =
+        first(
+          Package_ID[
+            !is.na(Package_ID) &
+              Package_ID != ""
+          ]
+        ),
+      
+      # The representative DOI a series' EDI citations are attached to
+      # in Final_Relationships below. EDI records citations once per
+      # dataset series, not once per revision, so - like
+      # Query_Package_ID above - one DOI stands in for the whole
+      # series rather than repeating the same citation on every
+      # revision.
+      Representative_Dataset_DOI =
+        first(
+          Dataset_DOI[
+            !is.na(Dataset_DOI) &
+              Dataset_DOI != ""
+          ]
+        ),
+      
+      Dataset_Title =
+        first(
+          Dataset_Title
+        ),
+      
+      .groups = "drop"
+    )
+  
+  cat(
+    "Unique EDI dataset series:",
+    nrow(edi_series),
+    "\n"
+  )
+  
+  EDIutils::login(
+    key = edi_key
+  )
+  
+  cat(
+    "EDI login complete.\n"
+  )
+  
+  edi_citations_raw <- map_dfr(
+    
+    seq_len(
+      nrow(
+        edi_series
+      )
+    ),
+    
+    function(i) {
+      
+      dataset_series_id <-
+        edi_series$Dataset_Series_ID[i]
+      
+      query_package_id <-
+        edi_series$Query_Package_ID[i]
+      
+      dataset_title <-
+        edi_series$Dataset_Title[i]
+      
+      cat(
+        "[",
+        i,
+        "/",
+        nrow(edi_series),
+        "] ",
+        query_package_id,
+        "\n",
+        sep = ""
+      )
+      
+      citations <- tryCatch(
+        
+        EDIutils::list_data_package_citations(
+          packageId = query_package_id,
+          as = "data.frame",
+          list_all = TRUE,
+          env = "production"
+        ),
+        
+        error = function(e) {
+          
+          message(
+            "Could not retrieve citations for ",
+            query_package_id,
+            ": ",
+            conditionMessage(e)
+          )
+          
+          NULL
+        }
+      )
+      
+      if (
+        is.null(citations) ||
+        nrow(citations) == 0
+      ) {
+        
+        return(
+          tibble(
+            Dataset_Series_ID = character(),
+            EDI_Package_ID = character(),
+            Dataset_Title = character(),
+            EDI_Citation_ID = character(),
+            Paper_DOI = character(),
+            EDI_Paper_Title = character(),
+            EDI_Article_URL = character()
+          )
+        )
+      }
+      
+      required_cols <- c(
+        "journalCitationId",
+        "packageId",
+        "articleDoi",
+        "articleTitle",
+        "articleUrl"
+      )
+      
+      missing_cols <- setdiff(
+        required_cols,
+        names(citations)
+      )
+      
+      if (length(missing_cols) > 0) {
+        
+        stop(
+          paste0(
+            "EDI citation response is missing expected column(s): ",
+            paste(
+              missing_cols,
+              collapse = ", "
+            ),
+            "\nReturned columns were: ",
+            paste(
+              names(citations),
+              collapse = ", "
+            )
+          )
+        )
+      }
+      
+      citations %>%
+        transmute(
+          
+          Dataset_Series_ID =
+            dataset_series_id,
+          
+          EDI_Package_ID =
+            as.character(
+              packageId
+            ),
+          
+          Dataset_Title =
+            dataset_title,
+          
+          EDI_Citation_ID =
+            as.character(
+              journalCitationId
+            ),
+          
+          Paper_DOI =
+            clean_doi(
+              articleDoi
+            ),
+          
+          EDI_Paper_Title =
+            na_if(
+              trimws(
+                as.character(
+                  articleTitle
+                )
+              ),
+              ""
+            ),
+          
+          EDI_Article_URL =
+            na_if(
+              trimws(
+                as.character(
+                  articleUrl
+                )
+              ),
+              ""
+            )
+        )
+    }
+  )
+  
+  try(
+    EDIutils::logout(),
+    silent = TRUE
+  )
+  
+  cat(
+    "EDI citation records retrieved:",
+    nrow(edi_citations_raw),
+    "\n"
+  )
+  
+  # Keep ALL EDI citation records, including records without a DOI.
+  # Records without a DOI cannot be added to Final_Relationships below,
+  # but R/05_compare_edi_citations.R still needs them to report EDI
+  # citations that are not matched to any paper DOI.
+  
+  edi_citations <- edi_citations_raw %>%
+    
+    mutate(
+      Paper_DOI =
+        clean_doi(
+          Paper_DOI
+        )
+    ) %>%
+    
+    distinct(
+      Dataset_Series_ID,
+      EDI_Citation_ID,
+      .keep_all = TRUE
+    ) %>%
+    
+    left_join(
+      edi_series %>%
+        select(
+          Dataset_Series_ID,
+          Dataset_DOI =
+            Representative_Dataset_DOI
+        ),
+      by = "Dataset_Series_ID"
+    )
+  
+  cat(
+    "EDI journal citation records:",
+    nrow(edi_citations),
+    "\n"
+  )
+}
+
+
+# ------------------------------------------------
+# EDI CITATIONS READY TO ADD TO FINAL_RELATIONSHIPS
+#
+# Only records with both a Paper_DOI and a Dataset_DOI can become a
+# Final_Relationships row. Records missing either (for example an EDI
+# citation with no DOI) still appear in the EDI_Citations sheet below;
+# only R/05_compare_edi_citations.R's report can show those.
+# ------------------------------------------------
+
+edi_final_candidates <- edi_citations %>%
+  
+  filter(
+    !is.na(Paper_DOI),
+    !is.na(Dataset_DOI)
+  ) %>%
+  
+  transmute(
+    Dataset_DOI =
+      clean_doi(
+        Dataset_DOI
+      ),
+    Paper_DOI,
+    Paper_Title =
+      EDI_Paper_Title,
+    Year =
+      NA_integer_,
+    Found_By =
+      "EDI: Journal citation"
+  )
+
+
+# ================================================================
+# 22. OUTPUT SHEET: FINAL_RELATIONSHIPS
+# ================================================================
+#
+# Combines the API/metadata relationships, the exact relationships
+# confirmed in PDF text, and EDI's own recorded journal citations,
+# deduplicated to one row per dataset-paper pair. This is the table
+# the comparison scripts (03 and 05) read.
 # ================================================================
 
 final_publication_relationships <- bind_rows(
   
   api_unique,
   
-  pdf_confirmed
+  pdf_confirmed,
+  
+  edi_final_candidates
   
 ) %>%
   
@@ -2699,9 +3139,35 @@ final_publication_relationships <- bind_rows(
     .groups =
       "drop"
   )
-
 # ================================================================
-# 22. RELATIONSHIPS ADDED ONLY BY PDF VERIFICATION
+# ADD PUBLICATION TYPE
+# ================================================================
+
+unique_paper_dois <- final_publication_relationships %>%
+  dplyr::filter(
+    !is.na(Paper_DOI),
+    Paper_DOI != ""
+  ) %>%
+  dplyr::distinct(Paper_DOI)
+
+
+publication_types <- unique_paper_dois %>%
+  dplyr::rowwise() %>%
+  dplyr::mutate(
+    Publication_Type =
+      get_publication_type(Paper_DOI)
+  ) %>%
+  dplyr::ungroup()
+
+
+final_publication_relationships <-
+  final_publication_relationships %>%
+  dplyr::left_join(
+    publication_types,
+    by = "Paper_DOI"
+  )
+# ================================================================
+# 23. RELATIONSHIPS ADDED ONLY BY PDF VERIFICATION
 # ================================================================
 
 pdf_only_relationships <- final_publication_relationships %>%
@@ -2724,13 +3190,41 @@ if (nrow(pdf_only_relationships) > 0) {
 
 
 # ================================================================
-# 23. SAVE PUBLICATION SEARCH RESULTS
+# 24. RELATIONSHIPS ADDED ONLY BY EDI
+# ================================================================
+#
+# Paper-dataset relationships that EDI already recorded, but that
+# DataCite, OpenAlex, and PDF verification all missed.
+# ================================================================
+
+edi_only_relationships <- edi_final_candidates %>%
+  dplyr::distinct(Paper_DOI, Dataset_DOI) %>%
+  dplyr::anti_join(
+    dplyr::bind_rows(api_unique, pdf_confirmed) %>%
+      dplyr::distinct(Paper_DOI, Dataset_DOI),
+    by = c("Paper_DOI", "Dataset_DOI")
+  )
+
+
+if (nrow(edi_only_relationships) > 0) {
+  cat(
+    "\nRelationships added only by EDI:\n"
+  )
+  print(
+    edi_only_relationships
+  )
+}
+
+
+# ================================================================
+# 25. SAVE PUBLICATION SEARCH RESULTS
 # ================================================================
 
 openxlsx::write.xlsx(
   list(
     Publication_Search = publication_search,
     PDF_Results = pdf_results,
+    EDI_Citations = edi_citations,
     Final_Relationships = final_publication_relationships
   ),
   file = publication_results_file,
@@ -2744,7 +3238,11 @@ cat(
   "Saved results: ", publication_results_file, "\n",
   "Publication-search relationships: ", nrow(publication_search), "\n",
   "PDF candidates checked: ", n_distinct(pdf_results$Paper_DOI), "\n",
+  "EDI journal citation records: ", nrow(edi_citations), "\n",
   "Relationships added only by PDF verification: ", nrow(pdf_only_relationships), "\n",
+  "Relationships added only by EDI: ", nrow(edi_only_relationships), "\n",
   "Final paper-dataset relationships: ", nrow(final_publication_relationships), "\n",
   "========================================\n"
 )
+
+

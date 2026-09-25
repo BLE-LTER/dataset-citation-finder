@@ -14,7 +14,7 @@
 # group must be readable through the Zotero API.
 #
 # Zotero_Comparison.xlsx, created by R/03_compare_zotero.R, is used when
-# it exists. Its Zotero_For_Website sheet already holds an OpenAlex
+# it exists. Its Zotero_Publications sheet already holds an OpenAlex
 # cited-by count for each publication DOI, so those values are reused and
 # only the missing ones are requested again. The file is optional; if it
 # is absent, every count is retrieved from OpenAlex here instead. Running
@@ -355,7 +355,10 @@ cat(
 # 2. PUBLICATION TYPES
 # ================================================================
 
-# Publication types are defined in config.R.
+# Every item in the configured collection is treated as a publication
+# automatically - the collection itself is the curated list of
+# publications, so there is no publication_types setting in config.R
+# to keep in sync with Zotero's item type names.
 
 # ================================================================
 # 3. EXTRACT PUBLICATION FIELDS
@@ -375,9 +378,12 @@ zotero_publications <- map_dfr(
     )
     
     
+    # Skip standalone Notes or Attachments, which are not
+    # publications, in case either is ever added to the collection
+    # directly rather than as a child of a real item.
     if (
-      !item_type %in%
-      publication_types
+      item_type %in%
+      c("note", "attachment")
     ) {
       
       return(
@@ -656,7 +662,7 @@ unique_paper_dois <- zotero_citation_list %>%
 # REUSE COUNTS ALREADY RETRIEVED BY 03_compare_zotero.R
 # ------------------------------------------------
 # 03_compare_zotero.R asks OpenAlex for a cited-by count for every
-# publication DOI and saves the answers in the Zotero_For_Website sheet
+# publication DOI and saves the answers in the Zotero_Publications sheet
 # of Zotero_Comparison.xlsx. Reading those values back means this script
 # only has to ask OpenAlex about DOIs that report is missing.
 #
@@ -681,7 +687,7 @@ max_comparison_age_days <- get0(
 )
 
 if (file.exists(zotero_comparison_file)) {
-
+  
   comparison_age_days <- as.numeric(
     difftime(
       Sys.time(),
@@ -689,21 +695,21 @@ if (file.exists(zotero_comparison_file)) {
       units = "days"
     )
   )
-
+  
   comparison_is_fresh <- is.infinite(max_comparison_age_days) ||
     comparison_age_days < max_comparison_age_days
-
+  
   if (comparison_is_fresh) {
-
+    
     existing_counts <- tryCatch(
       {
         previous <- openxlsx::read.xlsx(
           zotero_comparison_file,
-          sheet = "Zotero_For_Website"
+          sheet = "Zotero_Publications"
         )
-
+        
         if (all(c("Paper_DOI", "Cited_By_Count") %in% names(previous))) {
-
+          
           previous %>%
             transmute(
               Paper_DOI = clean_doi(Paper_DOI),
@@ -719,7 +725,7 @@ if (file.exists(zotero_comparison_file)) {
               Paper_DOI,
               .keep_all = TRUE
             )
-
+          
         } else {
           existing_counts
         }
@@ -734,7 +740,7 @@ if (file.exists(zotero_comparison_file)) {
         existing_counts
       }
     )
-
+    
     cat(
       "Reusing ",
       nrow(existing_counts),
@@ -745,9 +751,9 @@ if (file.exists(zotero_comparison_file)) {
       " day(s) old)\n",
       sep = ""
     )
-
+    
   } else {
-
+    
     cat(
       basename(zotero_comparison_file),
       " is ",
@@ -758,7 +764,7 @@ if (file.exists(zotero_comparison_file)) {
       sep = ""
     )
   }
-
+  
 } else {
   cat(
     "No ",
@@ -789,7 +795,7 @@ cat(
 )
 
 fetched_counts <- if (length(dois_to_fetch)) {
-
+  
   map_dfr(
     dois_to_fetch,
     function(doi) {
@@ -808,9 +814,9 @@ fetched_counts <- if (length(dois_to_fetch)) {
       Paper_DOI,
       Cited_By_Count
     )
-
+  
 } else {
-
+  
   tibble(
     Paper_DOI = character(),
     Cited_By_Count = integer()
