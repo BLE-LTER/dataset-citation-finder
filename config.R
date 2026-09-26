@@ -29,7 +29,7 @@
 # LTER / EDI SETTINGS
 # ------------------------------------------------
 # Set edi_scope to your EDI scope, for example "knb-lter-ble".
-# Set it to "" if you do not want 01_get_dataset_dois.R to harvest EDI.
+# Set it to "" to skip EDI registry harvesting in 01 and EDI citations in 02.
 
 edi_scope <- "knb-lter-ble"
 
@@ -44,7 +44,7 @@ edi_scope <- "knb-lter-ble"
 zotero_group_id <- "2211939"
 
 # ID of the Zotero collection holding the site's publications, used by
-# 03_compare_zotero.R and 04_create_zotero_publication_list.R. Zotero's
+# 02_find_dataset_citations.R. Zotero's
 # API calls this the collection "key"; it is an eight-character code.
 #
 # To find it, open the collection in your Zotero group on the web. The ID
@@ -68,18 +68,18 @@ zotero_dataset_tag <- "LTER-Funded Data at Other Archives"
 
 
 # ------------------------------------------------
-# PUBLICATION TYPES INCLUDED FROM ZOTERO
+# COMBINED RESULTS: DATASET REVISION DEDUPLICATION
 # ------------------------------------------------
-# There is nothing to set here. 03_compare_zotero.R and
-# 04_create_zotero_publication_list.R automatically treat every item in
-# zotero_publication_collection_id as a publication - that collection
-# is already the curated list of publications, so there is no separate
-# type list to maintain here, and no Zotero item-type names to look up.
-#
-# The only items those scripts skip are standalone Notes or
-# Attachments, since those are never publications; that exclusion is
-# fixed in the scripts themselves and does not need to be configured
-# here.
+# TRUE: one row per paper DOI + EDI dataset series (scope + identifier).
+# Select the dataset DOI/revision from DataCite first, then Zotero, then EDI.
+# OpenAlex and PDF provide fallback revisions, in that order. Ties within
+# one source use the highest numeric revision, then the dataset DOI.
+# FALSE: one row per paper DOI + dataset DOI; distinct revisions remain.
+# Non-EDI datasets always use DOI matching. Source worksheets keep all
+# their revision-level evidence in either mode. Revision-mismatch review
+# sheets are produced only in TRUE mode.
+
+deduplicate_on_dataset_id <- TRUE
 
 
 # ------------------------------------------------
@@ -138,21 +138,6 @@ publication_results_file <- file.path(
   "Publication_Search_Results.xlsx"
 )
 
-zotero_comparison_file <- file.path(
-  output_dir,
-  "Zotero_Comparison.xlsx"
-)
-
-zotero_comprehensive_file <- file.path(
-  output_dir,
-  "Zotero_Comprehensive_Publication_List.xlsx"
-)
-
-edi_journal_citation_file <- file.path(
-  output_dir,
-  "EDI_Journal_Citation_Comparison.xlsx"
-)
-
 cache_file <- file.path(
   output_dir,
   "openalex_cache.rds"
@@ -172,25 +157,7 @@ cache_file <- file.path(
 # citations sooner, raise it to make fewer API requests. Set it to Inf
 # to keep cached responses forever.
 
-cache_max_age_days <- 60
-
-
-# ------------------------------------------------
-# ZOTERO COMPARISON REUSE EXPIRY
-# ------------------------------------------------
-# 04_create_zotero_publication_list.R can skip asking OpenAlex for a
-# cited-by count it can instead read from Zotero_Comparison.xlsx, which
-# 03_compare_zotero.R already saved (see that script's OUTPUT COLUMNS).
-# This is a separate cache from openalex_cache.rds above: it reuses an
-# entire report file rather than individual timestamped responses.
-#
-# Those saved counts are reused only while Zotero_Comparison.xlsx is
-# younger than the number of days below. Once the file is older than
-# that, 04 ignores it and re-fetches every citation count from OpenAlex
-# instead. Set it to Inf to always reuse the existing file, however old
-# it is; set it to 0 to always re-fetch every count.
-
-zotero_comparison_cache_max_age_days <- 30
+cache_max_age_days <- 10
 
 
 # ------------------------------------------------

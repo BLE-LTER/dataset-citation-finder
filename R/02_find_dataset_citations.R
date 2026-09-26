@@ -1,84 +1,45 @@
 # ================================================================
 # 02_find_dataset_citations.R
-# PUBLICATION DISCOVERY AND PDF VERIFICATION
+# DATASET CITATION DISCOVERY, CONSOLIDATION, AND CURATION REPORTS
 # ================================================================
 #
-# PURPOSE:
-# Discover publications associated with dataset DOIs in Data_Registry.xlsx
-# using DataCite and OpenAlex, then use site-specific keyword searches to
-# find additional candidate papers and verify dataset references in PDFs
-# when an OpenAlex PDF URL is available.
+# Read Data_Registry.xlsx from output_dir (config.R). Search DataCite and
+# OpenAlex and verify exact dataset references in keyword-discovered PDFs.
+# Optionally retrieve EDI journal citations and dataset DOIs recorded in
+# the Extra field of publications in the configured Zotero collection.
 #
-# INPUT:
-# Data_Registry.xlsx, created by R/01_get_dataset_dois.R, read from the
-# directory set by output_dir in config.R.
+# OUTPUT: Publication_Search_Results.xlsx
+#   DataCite_Citations          - DataCite/OpenAlex DOI relationships.
+#   PDF_Citations               - keyword candidates and PDF check outcomes.
+#   EDI_Citations               - optional EDI records, including unresolved
+#                                 packages and records without a paper DOI.
+#   Zotero_Citations            - optional Extra-field dataset DOI matches.
+#   Combined_Results            - one publication-dataset citation per row.
+#   Result_Counts               - citations per registry dataset/series,
+#                                 including datasets with zero citations.
+#   Missing_From_Zotero         - optional papers absent from the collection.
+#   Zotero_Missing_Data_DOI     - optional missing Extra-field dataset links.
+#   EDI_Missing_Links           - optional missing EDI journal citations.
+#   Zotero_Revision_Mismatches / EDI_Revision_Mismatches
+#                               - optional revision review, in series mode.
 #
-# OPENALEX API KEY:
-# OPENALEX_API_KEY is used for the OpenAlex citation-graph, text, and
-# keyword requests made below. This workflow makes many API requests;
-# a free OpenAlex key provides a larger request budget and helps avoid
-# rate-limit failures. Store the key in .Renviron, not in this script.
-# The script can attempt keyless requests when no key is available, but
-# results may be incomplete if OpenAlex rate limits are reached.
+# deduplicate_on_dataset_id = TRUE groups each paper's EDI dataset links
+# by scope + identifier. Select a revision from DataCite, then Zotero, then
+# EDI; fall back to OpenAlex, then PDF. FALSE groups by exact dataset DOI.
+# Source sheets retain revision-level evidence in both modes. Non-EDI
+# datasets always match by DOI. Review sheets include the recommended
+# dataset DOI and package ID; no EDI or Zotero records are changed.
 #
-# EDI API KEY:
-# EDI_API_KEY authenticates the EDIutils request used to retrieve journal
-# citations recorded in EDI (see "EDI JOURNAL CITATIONS" below). Only
-# required when edi_scope (config.R) is set; a site that does not archive
-# datasets in EDI can leave edi_scope blank and skip this entirely. Store
-# the key in .Renviron, not in this script.
+# EDI requires edi_scope and EDI_API_KEY. Zotero retrieval requires both
+# zotero_group_id and zotero_publication_collection_id and a public group.
+# OPENALEX_API_KEY is recommended. Store keys in .Renviron. No publication
+# citation counts or standalone publication-list reports are generated.
 #
-# OUTPUTS:
-# Both files are written to the directory set by output_dir in config.R
-# (by default Citation_finder_output in the repository root).
-#
-# Publication_Search_Results.xlsx
-#   Publication_Search  - metadata/API-discovered paper-dataset pairs.
-#   PDF_Results         - papers discovered by site-keyword searches that
-#                         were checked for an available PDF/full text.
-#   EDI_Citations       - journal citations recorded in EDI for each
-#                         dataset series (only when edi_scope is set).
-#                         R/05_compare_edi_citations.R reads this sheet
-#                         instead of querying EDI itself.
-#   Final_Relationships - union of Publication_Search relationships,
-#                         additional exact dataset references confirmed
-#                         during PDF verification, and EDI_Citations
-#                         records that have both a paper DOI and a
-#                         dataset DOI.
-#
-# openalex_cache.rds
-#   Saved OpenAlex responses, reused on later runs to avoid repeating
-#   requests. An entry is reused only while it is younger than
-#   cache_max_age_days (config.R); older entries are re-fetched.
-#
-# IMPORTANT COLUMN MEANINGS:
-# Search_Source identifies the service that supplied relationship evidence
-# (DataCite and/or OpenAlex). Search_Method describes the evidence method:
-# Citation relationship, Exact relatedIdentifier, Citation graph,
-# Dataset DOI text, or Final URL text.
-#
-# Discovery_Keyword is the configured site term that caused OpenAlex to
-# return a paper as a PDF candidate. Matched_Site_Keyword is a configured
-# site term actually found in the extracted PDF text. These can differ.
-#
-# In Final_Relationships, Found_By records every source that supplied a
-# relationship, including "EDI: Journal citation" when EDI already
-# recorded the paper-dataset pair.
-#
-# WHY FINAL_RELATIONSHIPS CAN HAVE MORE ROWS:
-# Publication_Search contains API/metadata discoveries. PDF verification
-# and EDI's own recorded journal citations can each confirm a
-# paper-dataset relationship that the API searches did not return, so
-# Final_Relationships may legitimately contain more rows. The script
-# reports how many relationships were added only by PDF checking and how
-# many were added only from EDI.
-#
-# FILE BEHAVIOR:
-# The output directory is defined in config.R. If it does not exist,
-# this script announces and creates it. Existing output/cache files may be
-# overwritten or updated. A completion message prints counts and file paths.
+# OpenAlex responses are cached in openalex_cache.rds, subject to
+# cache_max_age_days. EDI and Zotero are retrieved afresh on each run.
+# Existing output/cache files may be overwritten. See README.md for the
+# worksheet columns, matching rules, limitations, and setup instructions.
 # ================================================================
-
 
 # ================================================================
 # LOAD PROJECT CONFIGURATION AND SHARED HELPERS
@@ -100,6 +61,24 @@ source(file.path(project_root, "config.R"))
 source(file.path(project_root, "R", "utils.R"))
 load_citation_finder_packages()
 ensure_output_dir()
+
+is_configured <- function(x) {
+  length(x) == 1L && !is.na(x) && nzchar(trimws(as.character(x)))
+}
+if (!is.logical(deduplicate_on_dataset_id) || length(deduplicate_on_dataset_id) != 1L ||
+    is.na(deduplicate_on_dataset_id)) {
+  stop("deduplicate_on_dataset_id in config.R must be TRUE or FALSE.", call. = FALSE)
+}
+has_edi <- is_configured(edi_scope)
+has_zotero <- is_configured(zotero_group_id) && is_configured(zotero_publication_collection_id)
+if (has_edi && !is_configured(edi_key)) {
+  stop("edi_scope is set, but EDI_API_KEY is missing. Add it to .Renviron, or clear edi_scope to skip EDI.",
+       call. = FALSE)
+}
+if (!has_edi) message("EDI citations and EDI review sheets are disabled (edi_scope is blank).")
+if (!has_zotero) {
+  message("Zotero citations and Zotero review sheets are disabled: set both zotero_group_id and zotero_publication_collection_id to enable them.")
+}
 
 if (is.null(openalex_key)) {
   warning(
@@ -1538,11 +1517,11 @@ api_relationships <- api_relationships %>%
 
 
 # ================================================================
-# 12. OUTPUT SHEET: PUBLICATION_SEARCH
+# 12. OUTPUT SHEET: DATACITE_CITATIONS
 # ================================================================
 #
 # One row per Paper_DOI + Dataset_DOI found by the DataCite and OpenAlex
-# searches above. This table is written to the Publication_Search
+# searches above. This table is written to the DataCite_Citations
 # worksheet of Publication_Search_Results.xlsx.
 # ================================================================
 
@@ -1906,7 +1885,7 @@ keyword_raw <- map_dfr(
 # 15. ONE KEYWORD CANDIDATE PER PAPER
 #
 # IMPORTANT:
-# We keep papers even if they already appear in Publication_Search.
+# We keep papers even if they already appear in DataCite_Citations.
 # This allows PDF verification to act independently.
 # ================================================================
 
@@ -2599,12 +2578,12 @@ verify_pdf <- function(
 
 
 # ================================================================
-# 19. OUTPUT SHEET: PDF_RESULTS
+# 19. OUTPUT SHEET: PDF_CITATIONS
 # ================================================================
 #
 # Checks each keyword-discovered candidate paper. Every candidate gets a
 # row, including candidates with no reachable PDF, so PDF_Status explains
-# what happened. This is written to the PDF_Results worksheet.
+# what happened. This is written to the PDF_Citations worksheet.
 # ================================================================
 
 pdf_results <- if (
@@ -2710,539 +2689,214 @@ pdf_confirmed <- pdf_results %>%
 
 
 # ================================================================
-# 21. EDI JOURNAL CITATIONS
-# ================================================================
-#
-# EDI records journal citations for each dataset series on its own,
-# independently of the DataCite/OpenAlex/PDF discovery above.
-# Retrieving them here - instead of only in
-# R/05_compare_edi_citations.R - means a citation EDI already knows
-# about is included in Final_Relationships even when DataCite,
-# OpenAlex, and PDF verification all miss it, and it saves 05 from
-# repeating this same EDI query.
-#
-# Skipped entirely when edi_scope is blank (config.R): a site that
-# does not archive its datasets in EDI has no EDI journal citations to
-# add.
+# 21. EDI JOURNAL CITATIONS (OPTIONAL)
 # ================================================================
 
-edi_citations <- tibble(
-  Dataset_Series_ID = character(),
-  EDI_Package_ID = character(),
-  Dataset_Title = character(),
-  EDI_Citation_ID = character(),
-  Paper_DOI = character(),
-  EDI_Paper_Title = character(),
-  EDI_Article_URL = character(),
-  Dataset_DOI = character()
-)
+citation_registry <- prepare_citation_registry(master_data_registry)
+edi_registry <- citation_registry %>%
+  filter(!is.na(Dataset_Series_ID),
+         startsWith(Dataset_Series_ID, paste0(edi_scope, ".")))
 
-if (is.null(edi_scope) || !nzchar(trimws(edi_scope))) {
-  
-  cat(
-    "\nedi_scope is blank in config.R; skipping EDI journal citations.\n"
-  )
-  
-} else {
-  
-  if (is.null(edi_key) || !nzchar(trimws(edi_key))) {
-    stop(
-      paste0(
-        "EDI_API_KEY could not be found, but edi_scope is set in config.R. ",
-        "Add EDI_API_KEY to .Renviron and restart R, or set edi_scope to \"\" ",
-        "if this site does not archive datasets in EDI.\nSee README.md."
+empty_edi_citations <- function() {
+  tibble(Query_Package_ID = character(), EDI_Package_ID = character(),
+         Dataset_Series_ID = character(), EDI_Citation_ID = character(),
+         Paper_DOI = character(), EDI_Paper_Title = character(),
+         EDI_Article_URL = character(), Dataset_DOI = character(),
+         Dataset_Title = character(), Mapping_Status = character())
+}
+
+get_edi_citations <- function() {
+  # Keep typed columns even when the configured scope has no registry rows.
+  if (!nrow(edi_registry)) return(empty_edi_citations())
+  series <- edi_registry %>%
+    arrange(Dataset_Package_ID) %>%
+    distinct(Dataset_Series_ID, .keep_all = TRUE)
+
+  EDIutils::login(key = edi_key)
+  on.exit(try(EDIutils::logout(), silent = TRUE), add = TRUE)
+  rows <- map(seq_len(nrow(series)), function(i) {
+    query_package <- series$Dataset_Package_ID[i]
+    cat("EDI citations: ", query_package, " (", i, "/", nrow(series), ")\n", sep = "")
+    citations <- tryCatch(
+      EDIutils::list_data_package_citations(
+        packageId = query_package, as = "data.frame", list_all = TRUE,
+        env = "production"
       ),
-      call. = FALSE
+      error = function(e) stop(
+        "EDI retrieval failed for ", query_package, ": ", conditionMessage(e),
+        "\nCannot produce a complete EDI comparison. Retry Step 02 later.", call. = FALSE
+      )
     )
+    if (is.null(citations) || !nrow(citations)) return(empty_edi_citations())
+    map_edi_citations(citations, citation_registry, query_package)
+  })
+  bind_rows(empty_edi_citations(), bind_rows(rows)) %>%
+    distinct(EDI_Citation_ID, EDI_Package_ID, Paper_DOI, .keep_all = TRUE)
+}
+
+edi_citations <- if (has_edi) get_edi_citations() else empty_edi_citations()
+
+# ================================================================
+# 22. ZOTERO EXTRA-FIELD DATASET CITATIONS (OPTIONAL)
+# ================================================================
+
+empty_zotero_publications <- function() {
+  tibble(Zotero_Item_Key = character(), Paper_DOI = character(),
+         Paper_Title = character(), Year = integer(), Zotero_Extra = character(),
+         Zotero_Item_Type = character(), Zotero_Item_URL = character())
+}
+
+get_zotero_publications <- function() {
+  collection_url <- zotero_group_url("/collections/", zotero_publication_collection_id)
+  collection <- get_json(collection_url)
+  if (!collection$ok) {
+    stop("Cannot read the configured Zotero publication collection (HTTP status ",
+         collection$status, "). Check its group ID, collection key, and public access.",
+         call. = FALSE)
   }
-  
-  cat(
-    "\n========================================\n",
-    "GETTING EDI JOURNAL CITATIONS\n",
-    "========================================\n"
-  )
-  
-  edi_registry <- master_data_registry %>%
-    
-    filter(
-      Scope == edi_scope
-    ) %>%
-    
-    mutate(
-      Dataset_Series_ID =
-        paste0(
-          Scope,
-          ".",
-          Identifier
-        )
-    ) %>%
-    
-    select(
-      Dataset_Series_ID,
-      Package_ID,
-      Dataset_DOI,
-      Dataset_Title
+  # Strict pagination distinguishes an empty collection from a failed or
+  # incomplete response; otherwise failures could look like missing papers.
+  items <- paginate_json(paste0(collection_url, "/items/top"), strict = TRUE)
+  rows <- map(items, function(item) {
+    d <- item$data
+    if (safe(d$itemType) %in% c("note", "attachment")) return(empty_zotero_publications())
+    paper_doi <- clean_doi(safe(d$DOI))
+    if (is.na(paper_doi)) paper_doi <- first_text(extract_dois(safe(d$url, "")))
+    tibble(
+      Zotero_Item_Key = safe(item$key), Paper_DOI = paper_doi,
+      Paper_Title = safe(d$title),
+      Year = suppressWarnings(as.integer(str_extract(safe(d$date), "\\b[12][0-9]{3}\\b"))),
+      Zotero_Extra = safe(d$extra, ""), Zotero_Item_Type = safe(d$itemType),
+      Zotero_Item_URL = safe(item$links$alternate$href)
     )
-  
-  edi_series <- edi_registry %>%
-    
-    group_by(
-      Dataset_Series_ID
-    ) %>%
-    
-    summarise(
-      
-      Query_Package_ID =
-        first(
-          Package_ID[
-            !is.na(Package_ID) &
-              Package_ID != ""
-          ]
-        ),
-      
-      # The representative DOI a series' EDI citations are attached to
-      # in Final_Relationships below. EDI records citations once per
-      # dataset series, not once per revision, so - like
-      # Query_Package_ID above - one DOI stands in for the whole
-      # series rather than repeating the same citation on every
-      # revision.
-      Representative_Dataset_DOI =
-        first(
-          Dataset_DOI[
-            !is.na(Dataset_DOI) &
-              Dataset_DOI != ""
-          ]
-        ),
-      
-      Dataset_Title =
-        first(
-          Dataset_Title
-        ),
-      
-      .groups = "drop"
-    )
-  
-  cat(
-    "Unique EDI dataset series:",
-    nrow(edi_series),
-    "\n"
-  )
-  
-  EDIutils::login(
-    key = edi_key
-  )
-  
-  cat(
-    "EDI login complete.\n"
-  )
-  
-  edi_citations_raw <- map_dfr(
-    
-    seq_len(
-      nrow(
-        edi_series
-      )
-    ),
-    
-    function(i) {
-      
-      dataset_series_id <-
-        edi_series$Dataset_Series_ID[i]
-      
-      query_package_id <-
-        edi_series$Query_Package_ID[i]
-      
-      dataset_title <-
-        edi_series$Dataset_Title[i]
-      
-      cat(
-        "[",
-        i,
-        "/",
-        nrow(edi_series),
-        "] ",
-        query_package_id,
-        "\n",
-        sep = ""
-      )
-      
-      citations <- tryCatch(
-        
-        EDIutils::list_data_package_citations(
-          packageId = query_package_id,
-          as = "data.frame",
-          list_all = TRUE,
-          env = "production"
-        ),
-        
-        error = function(e) {
-          
-          message(
-            "Could not retrieve citations for ",
-            query_package_id,
-            ": ",
-            conditionMessage(e)
-          )
-          
-          NULL
-        }
-      )
-      
-      if (
-        is.null(citations) ||
-        nrow(citations) == 0
-      ) {
-        
-        return(
-          tibble(
-            Dataset_Series_ID = character(),
-            EDI_Package_ID = character(),
-            Dataset_Title = character(),
-            EDI_Citation_ID = character(),
-            Paper_DOI = character(),
-            EDI_Paper_Title = character(),
-            EDI_Article_URL = character()
-          )
-        )
-      }
-      
-      required_cols <- c(
-        "journalCitationId",
-        "packageId",
-        "articleDoi",
-        "articleTitle",
-        "articleUrl"
-      )
-      
-      missing_cols <- setdiff(
-        required_cols,
-        names(citations)
-      )
-      
-      if (length(missing_cols) > 0) {
-        
-        stop(
-          paste0(
-            "EDI citation response is missing expected column(s): ",
-            paste(
-              missing_cols,
-              collapse = ", "
-            ),
-            "\nReturned columns were: ",
-            paste(
-              names(citations),
-              collapse = ", "
-            )
-          )
-        )
-      }
-      
-      citations %>%
-        transmute(
-          
-          Dataset_Series_ID =
-            dataset_series_id,
-          
-          EDI_Package_ID =
-            as.character(
-              packageId
-            ),
-          
-          Dataset_Title =
-            dataset_title,
-          
-          EDI_Citation_ID =
-            as.character(
-              journalCitationId
-            ),
-          
-          Paper_DOI =
-            clean_doi(
-              articleDoi
-            ),
-          
-          EDI_Paper_Title =
-            na_if(
-              trimws(
-                as.character(
-                  articleTitle
-                )
-              ),
-              ""
-            ),
-          
-          EDI_Article_URL =
-            na_if(
-              trimws(
-                as.character(
-                  articleUrl
-                )
-              ),
-              ""
-            )
-        )
-    }
-  )
-  
-  try(
-    EDIutils::logout(),
-    silent = TRUE
-  )
-  
-  cat(
-    "EDI citation records retrieved:",
-    nrow(edi_citations_raw),
-    "\n"
-  )
-  
-  # Keep ALL EDI citation records, including records without a DOI.
-  # Records without a DOI cannot be added to Final_Relationships below,
-  # but R/05_compare_edi_citations.R still needs them to report EDI
-  # citations that are not matched to any paper DOI.
-  
-  edi_citations <- edi_citations_raw %>%
-    
-    mutate(
-      Paper_DOI =
-        clean_doi(
-          Paper_DOI
-        )
-    ) %>%
-    
-    distinct(
-      Dataset_Series_ID,
-      EDI_Citation_ID,
-      .keep_all = TRUE
-    ) %>%
-    
-    left_join(
-      edi_series %>%
-        select(
-          Dataset_Series_ID,
-          Dataset_DOI =
-            Representative_Dataset_DOI
-        ),
-      by = "Dataset_Series_ID"
-    )
-  
-  cat(
-    "EDI journal citation records:",
-    nrow(edi_citations),
-    "\n"
-  )
+  })
+  bind_rows(empty_zotero_publications(), bind_rows(rows)) %>%
+    distinct(Zotero_Item_Key, .keep_all = TRUE)
 }
 
-
-# ------------------------------------------------
-# EDI CITATIONS READY TO ADD TO FINAL_RELATIONSHIPS
-#
-# Only records with both a Paper_DOI and a Dataset_DOI can become a
-# Final_Relationships row. Records missing either (for example an EDI
-# citation with no DOI) still appear in the EDI_Citations sheet below;
-# only R/05_compare_edi_citations.R's report can show those.
-# ------------------------------------------------
-
-edi_final_candidates <- edi_citations %>%
-  
-  filter(
-    !is.na(Paper_DOI),
-    !is.na(Dataset_DOI)
-  ) %>%
-  
-  transmute(
-    Dataset_DOI =
-      clean_doi(
-        Dataset_DOI
-      ),
-    Paper_DOI,
-    Paper_Title =
-      EDI_Paper_Title,
-    Year =
-      NA_integer_,
-    Found_By =
-      "EDI: Journal citation"
-  )
-
+zotero_publications <- if (has_zotero) get_zotero_publications() else empty_zotero_publications()
+zotero_citations <- extract_zotero_citations(zotero_publications, citation_registry)
 
 # ================================================================
-# 22. OUTPUT SHEET: FINAL_RELATIONSHIPS
+# 23. COMBINE ALL SOURCE EVIDENCE
 # ================================================================
-#
-# Combines the API/metadata relationships, the exact relationships
-# confirmed in PDF text, and EDI's own recorded journal citations,
-# deduplicated to one row per dataset-paper pair. This is the table
-# the comparison scripts (03 and 05) read.
-# ================================================================
+# Source sheets retain their original revision-level evidence. Only this
+# combined view uses the configured series/DOI grouping and source priority.
+# EDI records without a paper DOI or an exact registry package mapping stay
+# visible in EDI_Citations but cannot supply a combined DOI relationship.
 
-final_publication_relationships <- bind_rows(
-  
-  api_unique,
-  
-  pdf_confirmed,
-  
-  edi_final_candidates
-  
-) %>%
-  
-  mutate(
-    
-    Dataset_DOI =
-      clean_doi(
-        Dataset_DOI
-      ),
-    
-    Paper_DOI =
-      clean_doi(
-        Paper_DOI
-      )
-  ) %>%
-  
-  filter(
-    
-    !is.na(
-      Paper_DOI
-    ),
-    
-    !is.na(
-      Dataset_DOI
-    )
-  ) %>%
-  
-  group_by(
-    Dataset_DOI,
-    Paper_DOI
-  ) %>%
-  
-  summarise(
-    
-    Paper_Title =
-      first_text(
-        Paper_Title
-      ),
-    
-    Year =
-      first_int(
-        Year
-      ),
-    
-    Found_By =
-      paste(
-        
-        unique(
-          Found_By
-        ),
-        
-        collapse =
-          " + "
-      ),
-    
-    .groups =
-      "drop"
-  )
-# ================================================================
-# ADD PUBLICATION TYPE
-# ================================================================
+api_evidence <- api_relationships %>%
+  transmute(Dataset_DOI, Paper_DOI, Paper_Title, Year,
+            Source = Search_Source, Found_By = paste(Search_Source, Search_Method, sep = ": "))
+pdf_evidence <- pdf_confirmed %>% mutate(Source = "PDF")
+edi_evidence <- edi_citations %>%
+  transmute(Dataset_DOI, Paper_DOI, Paper_Title = EDI_Paper_Title,
+            Year = NA_integer_, Source = "EDI", Found_By = "EDI: Journal citation")
+zotero_evidence <- zotero_citations %>%
+  transmute(Dataset_DOI, Paper_DOI, Paper_Title, Year,
+            Source = "Zotero", Found_By = "Zotero: Dataset DOI in Extra")
 
-unique_paper_dois <- final_publication_relationships %>%
-  dplyr::filter(
-    !is.na(Paper_DOI),
-    Paper_DOI != ""
-  ) %>%
-  dplyr::distinct(Paper_DOI)
-
-
-publication_types <- unique_paper_dois %>%
-  dplyr::rowwise() %>%
-  dplyr::mutate(
-    Publication_Type =
-      get_publication_type(Paper_DOI)
-  ) %>%
-  dplyr::ungroup()
-
-
-final_publication_relationships <-
-  final_publication_relationships %>%
-  dplyr::left_join(
-    publication_types,
-    by = "Paper_DOI"
-  )
-# ================================================================
-# 23. RELATIONSHIPS ADDED ONLY BY PDF VERIFICATION
-# ================================================================
-
-pdf_only_relationships <- final_publication_relationships %>%
-  dplyr::anti_join(
-    publication_search %>%
-      dplyr::distinct(Paper_DOI, Dataset_DOI),
-    by = c("Paper_DOI", "Dataset_DOI")
-  )
-
-
-if (nrow(pdf_only_relationships) > 0) {
-  cat(
-    "\nRelationships added only by PDF verification:\n"
-  )
-  print(
-    pdf_only_relationships %>%
-      dplyr::select(Paper_DOI, Dataset_DOI, Paper_Title, Found_By)
-  )
-}
-
-
-# ================================================================
-# 24. RELATIONSHIPS ADDED ONLY BY EDI
-# ================================================================
-#
-# Paper-dataset relationships that EDI already recorded, but that
-# DataCite, OpenAlex, and PDF verification all missed.
-# ================================================================
-
-edi_only_relationships <- edi_final_candidates %>%
-  dplyr::distinct(Paper_DOI, Dataset_DOI) %>%
-  dplyr::anti_join(
-    dplyr::bind_rows(api_unique, pdf_confirmed) %>%
-      dplyr::distinct(Paper_DOI, Dataset_DOI),
-    by = c("Paper_DOI", "Dataset_DOI")
-  )
-
-
-if (nrow(edi_only_relationships) > 0) {
-  cat(
-    "\nRelationships added only by EDI:\n"
-  )
-  print(
-    edi_only_relationships
-  )
-}
-
-
-# ================================================================
-# 25. SAVE PUBLICATION SEARCH RESULTS
-# ================================================================
-
-openxlsx::write.xlsx(
-  list(
-    Publication_Search = publication_search,
-    PDF_Results = pdf_results,
-    EDI_Citations = edi_citations,
-    Final_Relationships = final_publication_relationships
-  ),
-  file = publication_results_file,
-  overwrite = TRUE
+all_evidence <- bind_rows(empty_citation_evidence(), api_evidence, pdf_evidence,
+                          edi_evidence, zotero_evidence)
+combined_results <- combine_citation_evidence(
+  all_evidence, citation_registry, deduplicate_on_dataset_id
 )
 
-cat(
-  "\n========================================\n",
-  "PUBLICATION SEARCH + PDF CHECK COMPLETE\n",
-  "========================================\n",
-  "Saved results: ", publication_results_file, "\n",
-  "Publication-search relationships: ", nrow(publication_search), "\n",
-  "PDF candidates checked: ", n_distinct(pdf_results$Paper_DOI), "\n",
-  "EDI journal citation records: ", nrow(edi_citations), "\n",
-  "Relationships added only by PDF verification: ", nrow(pdf_only_relationships), "\n",
-  "Relationships added only by EDI: ", nrow(edi_only_relationships), "\n",
-  "Final paper-dataset relationships: ", nrow(final_publication_relationships), "\n",
-  "========================================\n"
+# This maps over zero DOIs safely when discovery produces no relationships.
+publication_types <- combined_results %>%
+  distinct(Paper_DOI) %>%
+  mutate(Publication_Type = purrr::map_chr(Paper_DOI, get_publication_type))
+combined_results <- combined_results %>% left_join(publication_types, by = "Paper_DOI")
+
+# ================================================================
+# 24. ZOTERO CURATION SHEETS (ONLY WHEN ZOTERO IS CONFIGURED)
+# ================================================================
+
+if (has_zotero) {
+  known_papers <- zotero_publications %>%
+    filter(!is.na(Paper_DOI)) %>% distinct(Paper_DOI)
+
+  missing_from_zotero <- combined_results %>%
+    anti_join(known_papers, by = "Paper_DOI") %>%
+    transmute(Paper_DOI, Paper_Title, Year, Dataset_Title, Dataset_Series_ID,
+              Recommended_Package_ID = Dataset_Package_ID,
+              Recommended_Dataset_DOI = Dataset_DOI, Selected_Source, Found_By)
+
+  zotero_links <- zotero_citations %>%
+    transmute(Paper_DOI, Dataset_DOI, Dataset_Package_ID, Dataset_Series_ID,
+              Record_ID = Zotero_Item_Key)
+  zotero_review <- catalog_link_review(
+    semi_join(combined_results, known_papers, by = "Paper_DOI"),
+    zotero_links, deduplicate_on_dataset_id
+  ) %>% rename(Zotero_Item_Key = Record_ID)
+
+  # Missing-link rows have no matched record. Supply the existing publication
+  # item(s) so the reviewer can locate the Extra field that needs the DOI.
+  publication_items <- zotero_publications %>%
+    filter(!is.na(Paper_DOI)) %>%
+    group_by(Paper_DOI) %>%
+    summarise(Publication_Item_Keys = collapse_citation_values(Zotero_Item_Key),
+              .groups = "drop")
+  zotero_review <- zotero_review %>%
+    left_join(publication_items, by = "Paper_DOI") %>%
+    mutate(Zotero_Item_Key = coalesce(Zotero_Item_Key, Publication_Item_Keys)) %>%
+    select(-Publication_Item_Keys)
+  zotero_missing_links <- zotero_review %>% filter(Review_Status == "Missing dataset link")
+  zotero_revision_review <- zotero_review %>% filter(Review_Status != "Missing dataset link")
+}
+
+# ================================================================
+# 25. EDI CURATION SHEETS (ONLY WHEN EDI IS CONFIGURED)
+# ================================================================
+
+if (has_edi) {
+  edi_links <- edi_citations %>%
+    transmute(Paper_DOI, Dataset_DOI, Dataset_Package_ID = EDI_Package_ID,
+              Dataset_Series_ID, Record_ID = EDI_Citation_ID)
+  edi_expected <- combined_results %>%
+    filter(Dataset_Series_ID %in% edi_registry$Dataset_Series_ID)
+  edi_review <- catalog_link_review(edi_expected, edi_links, deduplicate_on_dataset_id) %>%
+    rename(EDI_Citation_ID = Record_ID)
+  edi_missing_links <- edi_review %>% filter(Review_Status == "Missing dataset link")
+  edi_revision_review <- edi_review %>% filter(Review_Status != "Missing dataset link")
+}
+
+# ================================================================
+# 26. SAVE ONE WORKBOOK WITH SOURCE, COMBINED, AND CURATION SHEETS
+# ================================================================
+
+result_counts <- count_dataset_citations(
+  combined_results, citation_registry, deduplicate_on_dataset_id
 )
+sheets <- list(DataCite_Citations = publication_search, PDF_Citations = pdf_results)
+if (has_edi) sheets$EDI_Citations <- edi_citations
+if (has_zotero) sheets$Zotero_Citations <- zotero_citations
+sheets$Combined_Results <- combined_results
+sheets$Result_Counts <- result_counts
+if (has_zotero) {
+  sheets$Missing_From_Zotero <- missing_from_zotero
+  sheets$Zotero_Missing_Data_DOI <- zotero_missing_links
+  if (deduplicate_on_dataset_id) sheets$Zotero_Revision_Mismatches <- zotero_revision_review
+}
+if (has_edi) {
+  sheets$EDI_Missing_Links <- edi_missing_links
+  if (deduplicate_on_dataset_id) sheets$EDI_Revision_Mismatches <- edi_revision_review
+}
 
+openxlsx::write.xlsx(sheets, file = publication_results_file, overwrite = TRUE)
 
+# Discovery counts use exact DOI pairs, independent of the combined mode.
+# Count PDF-confirmed additions before EDI/Zotero so EDI-only evidence can
+# never be reported as a PDF discovery.
+pdf_only_relationships <- pdf_evidence %>%
+  filter(!is.na(Paper_DOI), !is.na(Dataset_DOI)) %>%
+  distinct(Paper_DOI, Dataset_DOI) %>%
+  anti_join(distinct(api_evidence, Paper_DOI, Dataset_DOI), by = c("Paper_DOI", "Dataset_DOI"))
+cat("\nSaved results: ", publication_results_file,
+    "\nDataCite/OpenAlex relationships: ", nrow(publication_search),
+    "\nAdditional PDF-confirmed DOI pairs: ", nrow(pdf_only_relationships),
+    "\nEDI: ", if (has_edi) paste(nrow(edi_citations), "citation records") else "disabled",
+    "\nZotero: ", if (has_zotero) paste(nrow(zotero_citations), "dataset links") else "disabled",
+    "\nCombined relationships: ", nrow(combined_results),
+    "\nDeduplication: ", if (deduplicate_on_dataset_id) "dataset series" else "dataset DOI",
+    "\n", sep = "")

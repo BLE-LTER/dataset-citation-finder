@@ -14,7 +14,9 @@
 #                                   local temporary copy.
 # safe(), clean_doi(), extract_dois() - small value helpers.
 # get_json(), paginate_json()     - HTTP helpers with retry/backoff.
-# oa_query(), get_openalex_citation_count() - OpenAlex helpers.
+# oa_query()                     - OpenAlex requests.
+# Citation helpers below normalize dataset identity, combine source
+# evidence, and build catalog review tables without making API requests.
 # ================================================================
 
 citation_finder_packages <- c(
@@ -251,7 +253,7 @@ get_json <- function(url, query = list(), attempts = 4, user_agent = "LTER-datas
   list(ok = FALSE, data = NULL, status = NA_integer_)
 }
 
-paginate_json <- function(url, extra = list(), user_agent = "LTER-dataset-citation-finder") {
+paginate_json <- function(url, extra = list(), user_agent = "LTER-dataset-citation-finder", strict = FALSE) {
   out <- list()
   start <- 0
 
@@ -265,7 +267,17 @@ paginate_json <- function(url, extra = list(), user_agent = "LTER-dataset-citati
       user_agent = user_agent
     )
 
-    if (!response$ok || is.null(response$data) || !length(response$data)) {
+    if (!response$ok || is.null(response$data)) {
+      if (strict) {
+        stop("Zotero retrieval failed at offset ", start,
+             " (HTTP status ", response$status,
+             "). No complete comparison can be produced. Try again later.",
+             call. = FALSE)
+      }
+      break
+    }
+
+    if (!length(response$data)) {
       break
     }
 
@@ -303,42 +315,236 @@ oa_query <- function(q) {
   )
 }
 
-get_openalex_citation_count <- function(paper_doi) {
-  doi <- clean_doi(paper_doi)
+# Only revisioned EDI package IDs qualify for series-based matching.
+# Including scope prevents dataset 12 at two sites from being conflated.
+dataset_series_id <- function(package_id) {
+  if (!length(package_id)) return(character())
+  parts <- stringr::str_match(as.character(package_id),
+                             "^([^.]+)\\.([0-9]+)\\.([0-9]+)$")
+  ifelse(is.na(parts[, 1]), NA_character_, paste(parts[, 2], parts[, 3], sep = "."))
+}
 
-  if (is.na(doi)) {
-    return(
-      tibble::tibble(
-        Paper_DOI = NA_character_,
-        Cited_By_Count = NA_integer_,
-        OpenAlex_ID = NA_character_
-      )
-    )
+prepare_citation_registry <- function(registry) {
+  registry %>%
+    dplyr::transmute(
+      Dataset_DOI = clean_doi(Dataset_DOI),
+      Dataset_Package_ID = dplyr::na_if(trimws(as.character(Package_ID)), ""),
+      Dataset_Title = as.character(Dataset_Title),
+      Dataset_Series_ID = dataset_series_id(Dataset_Package_ID),
+      Dataset_Revision = suppressWarnings(as.integer(
+        stringr::str_match(Dataset_Package_ID, "^[^.]+\\.[0-9]+\\.([0-9]+)$")[, 2]
+      ))
+    ) %>%
+    dplyr::filter(!is.na(Dataset_DOI)) %>%
+    dplyr::distinct(Dataset_DOI, .keep_all = TRUE)
+}
+
+citation_dataset_key <- function(doi, series, deduplicate_on_dataset_id) {
+  if (!length(doi)) return(character())
+  if (deduplicate_on_dataset_id) {
+    ifelse(!is.na(series), paste0("series:", series), paste0("doi:", doi))
+  } else {
+    paste0("doi:", doi)
   }
+}
 
-  response <- oa_query(
-    list(
-      filter = paste0("doi:https://doi.org/", doi),
-      corpus = "all",
-      per_page = 1
-    )
-  )
+collapse_citation_values <- function(x) {
+  values <- unique(as.character(x[!is.na(x) & as.character(x) != ""]))
+  if (length(values)) paste(values, collapse = "; ") else NA_character_
+}
 
-  if (!response$ok || is.null(response$data$results) || !length(response$data$results)) {
-    return(
-      tibble::tibble(
-        Paper_DOI = doi,
-        Cited_By_Count = NA_integer_,
-        OpenAlex_ID = NA_character_
-      )
-    )
+first_citation_value <- function(x) {
+  dplyr::first(x[!is.na(x) & as.character(x) != ""])
+}
+
+empty_citation_evidence <- function() {
+  tibble::tibble(Dataset_DOI = character(), Paper_DOI = character(),
+                 Paper_Title = character(), Year = integer(),
+                 Source = character(), Found_By = character())
+}
+
+# Package/series components sort numerically: scope.2 precedes scope.13,
+# and scope.2.2 precedes scope.2.13. Rows without IDs follow, ordered by DOI.
+sort_citation_results <- function(results, deduplicate_on_dataset_id) {
+  sort_id <- if (deduplicate_on_dataset_id) {
+    dplyr::coalesce(results$Dataset_Series_ID, results$Dataset_Package_ID)
+  } else {
+    results$Dataset_Package_ID
   }
+  parts <- stringr::str_match(sort_id, "^([^.]+)\\.([0-9]+)(?:\\.([0-9]+))?$")
+  results %>%
+    dplyr::mutate(
+      .Sort_ID = sort_id,
+      .Sort_Scope = dplyr::coalesce(parts[, 2], sort_id),
+      .Sort_Identifier = suppressWarnings(as.numeric(parts[, 3])),
+      .Sort_Revision = suppressWarnings(as.numeric(parts[, 4])),
+      .Sort_Paper = if ("Paper_DOI" %in% names(results)) results$Paper_DOI else rep("", nrow(results))
+    ) %>%
+    dplyr::arrange(is.na(.Sort_ID), .Sort_Scope, .Sort_Identifier, .Sort_Revision,
+                   .Sort_ID, Dataset_DOI, .Sort_Paper) %>%
+    dplyr::select(-dplyr::starts_with(".Sort_"))
+}
 
-  work <- response$data$results[[1]]
+# Pure transformation: no HTTP requests, workbook reads, or file writes.
+combine_citation_evidence <- function(evidence, registry, deduplicate_on_dataset_id) {
+  evidence %>%
+    dplyr::mutate(Dataset_DOI = clean_doi(Dataset_DOI),
+                  Paper_DOI = clean_doi(Paper_DOI)) %>%
+    dplyr::filter(!is.na(Dataset_DOI), !is.na(Paper_DOI)) %>%
+    dplyr::left_join(registry, by = "Dataset_DOI") %>%
+    dplyr::mutate(
+      Dataset_Key = citation_dataset_key(Dataset_DOI, Dataset_Series_ID,
+                                         deduplicate_on_dataset_id),
+      Source_Priority = match(Source, c("DataCite", "Zotero", "EDI", "OpenAlex", "PDF"))
+    ) %>%
+    # Within one source, choose the highest numeric revision, then DOI.
+    # Input/API ordering therefore cannot change the selected revision.
+    dplyr::arrange(Source_Priority, dplyr::desc(Dataset_Revision), Dataset_DOI,
+                   Paper_DOI, Found_By) %>%
+    dplyr::group_by(Paper_DOI, Dataset_Key) %>%
+    dplyr::summarise(
+      Observed_Dataset_DOIs = collapse_citation_values(Dataset_DOI),
+      Observed_Package_IDs = collapse_citation_values(Dataset_Package_ID),
+      Dataset_DOI = dplyr::first(Dataset_DOI),
+      Dataset_Package_ID = dplyr::first(Dataset_Package_ID),
+      Dataset_Series_ID = dplyr::first(Dataset_Series_ID),
+      Dataset_Revision = dplyr::first(Dataset_Revision),
+      Dataset_Title = dplyr::first(Dataset_Title),
+      Paper_Title = first_citation_value(Paper_Title),
+      Year = first_citation_value(Year),
+      Selected_Source = dplyr::first(Source),
+      Supporting_Sources = collapse_citation_values(Source),
+      Found_By = collapse_citation_values(Found_By),
+      .groups = "drop"
+    ) %>%
+    dplyr::select(-Dataset_Key) %>%
+    dplyr::relocate(Dataset_Series_ID, Dataset_Package_ID, Dataset_DOI,
+                    Dataset_Title, Dataset_Revision, Paper_DOI) %>%
+    sort_citation_results(deduplicate_on_dataset_id)
+}
 
-  tibble::tibble(
-    Paper_DOI = doi,
-    Cited_By_Count = suppressWarnings(as.integer(safe(work$cited_by_count))),
-    OpenAlex_ID = safe(work$id)
-  )
+# Seed from the complete registry, not just discovered citations. In series
+# mode a count covers ALL registry revisions; do not imply that one revision
+# was selected for the entire dataset (different papers may select different ones).
+count_dataset_citations <- function(combined_results, registry, deduplicate_on_dataset_id) {
+  totals <- combined_results %>%
+    dplyr::filter(!is.na(Paper_DOI)) %>%
+    dplyr::mutate(Dataset_Key = citation_dataset_key(
+      Dataset_DOI, Dataset_Series_ID, deduplicate_on_dataset_id
+    )) %>%
+    dplyr::distinct(Paper_DOI, Dataset_Key) %>%
+    dplyr::count(Dataset_Key, name = "Citation_Count")
+
+  registry %>%
+    dplyr::mutate(Dataset_Key = citation_dataset_key(
+      Dataset_DOI, Dataset_Series_ID, deduplicate_on_dataset_id
+    )) %>%
+    sort_citation_results(deduplicate_on_dataset_id = FALSE) %>%
+    dplyr::group_by(Dataset_Key) %>%
+    dplyr::summarise(
+      Registry_Dataset_DOIs = collapse_citation_values(Dataset_DOI),
+      Registry_Package_IDs = collapse_citation_values(Dataset_Package_ID),
+      Dataset_Series_ID = dplyr::first(Dataset_Series_ID),
+      Dataset_Package_ID = if (deduplicate_on_dataset_id && !is.na(Dataset_Series_ID)) {
+        NA_character_
+      } else dplyr::first(Dataset_Package_ID),
+      Dataset_DOI = if (deduplicate_on_dataset_id && !is.na(Dataset_Series_ID)) {
+        NA_character_
+      } else dplyr::first(Dataset_DOI),
+      Dataset_Title = first_citation_value(Dataset_Title),
+      .groups = "drop"
+    ) %>%
+    dplyr::left_join(totals, by = "Dataset_Key") %>%
+    dplyr::mutate(Citation_Count = dplyr::coalesce(Citation_Count, 0L)) %>%
+    dplyr::select(Dataset_Series_ID, Dataset_Package_ID, Dataset_DOI, Dataset_Title,
+                  Citation_Count, Registry_Dataset_DOIs, Registry_Package_IDs) %>%
+    sort_citation_results(deduplicate_on_dataset_id)
+}
+
+# Exact DOI tokens in Extra, not substring matches and not arbitrary URLs.
+# No-paper-DOI matches remain in the source sheet for manual review.
+extract_zotero_citations <- function(publications, registry) {
+  publications %>%
+    dplyr::mutate(Dataset_DOI = purrr::map(Zotero_Extra, extract_dois)) %>%
+    tidyr::unnest_longer(Dataset_DOI, ptype = character()) %>%
+    dplyr::inner_join(registry, by = "Dataset_DOI") %>%
+    dplyr::distinct(Zotero_Item_Key, Dataset_DOI, .keep_all = TRUE)
+}
+
+# packageId in each EDI response is the recorded revision, not the
+# representative package used to query the series with list_all = TRUE.
+map_edi_citations <- function(citations, registry, query_package_id) {
+  required <- c("journalCitationId", "packageId")
+  if (!all(required %in% names(citations))) {
+    stop("EDI citation response is missing journalCitationId or packageId.", call. = FALSE)
+  }
+  for (column in c("articleDoi", "articleTitle", "articleUrl")) {
+    if (!column %in% names(citations)) citations[[column]] <- rep(NA_character_, nrow(citations))
+  }
+  citations %>%
+    dplyr::transmute(
+      Query_Package_ID = query_package_id,
+      EDI_Package_ID = dplyr::na_if(trimws(as.character(packageId)), ""),
+      Dataset_Series_ID = dplyr::coalesce(dataset_series_id(EDI_Package_ID),
+                                         dataset_series_id(query_package_id)),
+      EDI_Citation_ID = as.character(journalCitationId),
+      Paper_DOI = clean_doi(articleDoi),
+      EDI_Paper_Title = dplyr::na_if(trimws(as.character(articleTitle)), ""),
+      EDI_Article_URL = dplyr::na_if(trimws(as.character(articleUrl)), "")
+    ) %>%
+    dplyr::left_join(
+      registry %>%
+        dplyr::filter(!is.na(Dataset_Package_ID)) %>%
+        dplyr::select(Dataset_Package_ID, Dataset_DOI, Dataset_Title) %>%
+        dplyr::distinct(Dataset_Package_ID, .keep_all = TRUE),
+      by = c("EDI_Package_ID" = "Dataset_Package_ID")
+    ) %>%
+    dplyr::mutate(Mapping_Status = dplyr::if_else(
+      is.na(Dataset_DOI), "Package not in registry", "Matched exact package revision"
+    ))
+}
+
+# Observed columns: Paper_DOI, Dataset_DOI, Dataset_Package_ID,
+# Dataset_Series_ID, Record_ID. Comparisons use the SAME granularity as
+# Combined_Results; source rows themselves are never collapsed by series.
+catalog_link_review <- function(expected, observed, deduplicate_on_dataset_id) {
+  targets <- expected %>%
+    dplyr::mutate(Dataset_Key = citation_dataset_key(
+      Dataset_DOI, Dataset_Series_ID, deduplicate_on_dataset_id
+    )) %>%
+    dplyr::transmute(
+      Paper_DOI, Paper_Title, Dataset_Title, Dataset_Series_ID, Dataset_Key,
+      Recommended_Dataset_DOI = Dataset_DOI,
+      Recommended_Package_ID = Dataset_Package_ID,
+      Selected_Source, Found_By
+    )
+
+  links <- observed %>%
+    dplyr::filter(!is.na(Paper_DOI)) %>%
+    dplyr::mutate(Dataset_Key = citation_dataset_key(
+      Dataset_DOI, Dataset_Series_ID, deduplicate_on_dataset_id
+    )) %>%
+    dplyr::transmute(
+      Paper_DOI, Dataset_Key, Record_ID,
+      Recorded_Dataset_DOI = Dataset_DOI,
+      Recorded_Package_ID = Dataset_Package_ID,
+      Has_Record = TRUE
+    ) %>%
+    dplyr::distinct()
+
+  targets %>%
+    dplyr::left_join(links, by = c("Paper_DOI", "Dataset_Key")) %>%
+    dplyr::mutate(
+      Exact_Link = dplyr::coalesce(Recorded_Dataset_DOI == Recommended_Dataset_DOI, FALSE) |
+        dplyr::coalesce(Recorded_Package_ID == Recommended_Package_ID, FALSE),
+      Review_Status = dplyr::case_when(
+        is.na(Has_Record) ~ "Missing dataset link",
+        Exact_Link ~ "Already linked",
+        !is.na(dataset_series_id(Recorded_Package_ID)) ~ "Different dataset revision",
+        TRUE ~ "Review unresolved revision"
+      )
+    ) %>%
+    dplyr::filter(Review_Status != "Already linked") %>%
+    dplyr::select(-Dataset_Key, -Has_Record, -Exact_Link) %>%
+    dplyr::arrange(Paper_DOI, Dataset_Series_ID, Recorded_Package_ID)
 }
