@@ -1,551 +1,558 @@
 # Dataset Citation Finder
 
-An R workflow for listing LTER datasets and associated publications.
+An R workflow for finding publications associated with each LTER dataset.
 
-Last updated: 2026-09-23
+Last updated: 2026-09-30
 
 Originally created by the Beaufort Lagoon Ecosystems (BLE) LTER.
 
-## Overview
+## What the workflow does
 
-Dataset Citation Finder is an R workflow for identifying publications that cite,
-reference, or are otherwise associated with Long Term Ecological Research (LTER)
-datasets. It combines dataset information from the Environmental Data Initiative
-(EDI) and, optionally, Zotero with publication evidence from DataCite and
-OpenAlex. When an OpenAlex keyword search returns a paper with an accessible PDF,
-the workflow can also search the extracted PDF text for site terms and for exact
-dataset references. The workflow helps answer these questions:
+The workflow has two steps:
 
-1. What are the DOIs of my LTER site's datasets?
-2. Which papers cite my data?
-3. Are linkages between papers and my cited data set up in EDI and/or Zotero?
+1. **Build the dataset registry.** Script 01 collects DOI-bearing revisions of
+   EDI datasets and, optionally, datasets cataloged in Zotero with a dataset tag.
+2. **Find and reconcile dataset citations.** Script 02 searches DataCite and
+   OpenAlex, checks available PDFs from site-keyword searches, and optionally
+   retrieves EDI journal citations and Zotero publication Extra-field links.
+   It writes source evidence, combined results, and curation reports to one
+   Excel workbook.
 
-Everything the workflow produces is evidence for a person to review. The scripts
-never add, change, or delete records in EDI or Zotero. Results are saved as Excel
-files.
+Everything is evidence for a person to review. The scripts never add, change,
+or delete records in EDI or Zotero. The workflow does not create a general
+publication list or retrieve publication citation counts.
 
-A note on Zotero: BLE uses Zotero in a couple of ways that not all LTER sites 
-follow. Users can leave Zotero configuration parameters blank if they do not
-use Zotero in this way. The two ways are:
+## First run at your site
 
-1. BLE's primary data catalog reads directly from a list of BLE datasets
-   published at EDI. For cases when BLE datasets are archived elsewhere,
-   BLE catalogs those datasets in Zotero with a tag that
-   indicates that this item is a BLE dataset that is archived elsewhere.
-   Therefore, to a build a complete list of BLE dataset DOIs, BLE must search
-   both EDI and Zotero.
-2. BLE maintains a collection of its publications in Zotero. To associate
-   publications with BLE datasets, BLE includes the dataset DOI in the
-   `extra` field of Zotero for a given publication item. This R workflow
-   can alert you if it finds a dataset citation that is not represented in
-   your Zotero collection of publications.
+You need R installed; RStudio is optional but provides a convenient way to open
+and run the project. Enter the commands shown in this guide in the **R console**.
+The "repository root" means the folder containing `config.R` and `setup.R`.
 
-If you use Zotero, this R workflow assumes you catalog your publications and
-your non-EDI datasets in the **same Zotero group**. The **publications are organized**
-**into a collection** within that group. Items representing non-EDI datasets are
-not necessarily in a collection; rather, **dataset items have a tag**
-indicating that they are a dataset. Configuring the workflow to use Zotero
-is described later in this readme.
+1. Clone or download this repository and open `dataset-citation-finder.Rproj`
+   in RStudio. Without RStudio, set R's working directory to the repository root.
+2. Follow [Setup](#setup) to install packages, replace the BLE example settings
+   with your site's settings, and add your API keys. **Do this before running
+   either workflow script**; the supplied settings point to BLE's datasets and
+   publication collection.
+3. Run `source("R/01_get_dataset_dois.R")`. Open `Data_Registry.xlsx` in the
+   output folder and check that it includes the datasets and revisions you
+   expect. If you maintain the registry yourself, use the
+   [manual-registry instructions](#using-a-manually-maintained-registry) instead.
+4. Close the workbooks in Excel, then run `source("R/02_find_dataset_citations.R")`.
+   Wait for the R console to print `Saved results:` and the output path. Step 02
+   makes many requests and PDF checks, so completion time depends on your registry,
+   keywords, and available services.
+5. Open `Publication_Search_Results.xlsx`. Start with `Result_Counts` for an
+   overview, then `Combined_Results` for individual dataset citations. Use
+   [Reviewing the workbook](#reviewing-the-workbook) to follow up on the evidence
+   and suggested catalog changes.
 
-## API keys and `.Renviron`
+The default output folder is `Citation_finder_output` inside the repository.
+There is no need to run the helpers or tests for ordinary use.
 
-The workflow uses two API keys. Neither is stored in the code, and neither should
-ever be committed to GitHub. Rather, they are stored in a `.Renviron` file.
-`.gitignore` already excludes `.Renviron` so it is not added to the repository.
-See below for how to get your API keys.
+## Setup
 
-### EDI API key
+Open `dataset-citation-finder.Rproj` in RStudio, or set the R working directory
+to the repository root. Install the required packages once:
 
-`EDI_API_KEY` is used by `EDIutils` to authenticate requests that need an EDI
-identity: the EDI registry harvest in script 01 and the journal-citation
-comparison in script 05. Registered EDI users can create access keys in the EDI
-Identity and Access Manager, documented under **Profile Menu > Access Keys**:
+```r
+source("setup.R")
+```
 
-<https://edirepository.org/resources/iam>
+Scripts load packages but do not install them. Edit `config.R` before running
+any workflow script; its defaults describe BLE and should be changed for
+another site.
 
-### OpenAlex API key
+### Choose the sources your site uses
 
-`OPENALEX_API_KEY` is used for the OpenAlex work searches, citation-graph
-queries, keyword searches, and cited-by counts in scripts 02, 03, and 04. The
-workflow can attempt requests without a key, but it makes enough requests that a
-key is strongly recommended: it raises the available request budget and reduces
-rate-limit failures. Scripts warn when the key is absent. OpenAlex documents free
-API keys here:
+The dataset registry tells Step 02 **which datasets to search for**. It is
+separate from the publication collection that Step 02 searches for existing
+Zotero links. You can use EDI, Zotero, both, or a manually maintained registry.
 
-<https://help.openalex.org/api/authentication/>
+| What you want to do | Settings to provide | How to skip it |
+| --- | --- | --- |
+| Get dataset DOIs from EDI in Step 01 and existing journal links in Step 02 | Your `edi_scope` and `EDI_API_KEY` | Set `edi_scope <- ""`. |
+| Add non-EDI datasets cataloged in Zotero to the Step 01 registry | `zotero_group_id` and `zotero_dataset_tag` | Set `zotero_dataset_tag <- ""`. |
+| Read dataset links from Zotero publications in Step 02 and produce Zotero review sheets | `zotero_group_id` and `zotero_publication_collection_id` | Set `zotero_publication_collection_id <- ""`. |
 
-After creating an OpenAlex account, the key is available at:
+For example, a site using EDI but no Zotero should set its own `edi_scope` and
+clear all three Zotero settings. A site using Zotero only for publications can
+set the group and publication collection while leaving `zotero_dataset_tag`
+blank. Setting `zotero_group_id <- ""` disables both Zotero uses.
 
-<https://openalex.org/settings/api>
+DataCite/OpenAlex discovery and PDF checking remain available regardless of
+these optional catalog integrations. If neither source will build your dataset
+registry, provide one manually and start at Step 02.
 
-## Repository structure
+### API keys
 
-The repository contains configuration files, shared utilities, and five numbered
-workflow scripts.
-
-### Configuration and setup
-
-- `config.R` holds all site-specific settings: the EDI scope to search for your 
-  site's datasets, the Zotero settings, the site search terms, and the output location.
-  It also reads the project `.Renviron` so that API keys are available to every script.
-  More details are given below.
-- `setup.R` installs the R packages the workflow needs. It only has to be run
-  once, during initial setup.
-- `R/utils.R` holds the functions shared by more than one script, such as
-  `safe()`, `clean_doi()`, the OpenAlex request helpers, and
-  `prepare_xlsx_for_read()`, which verifies a workbook and reads it from a local
-  temporary copy so that a cloud-synced or open file cannot fail the read. The
-  numbered scripts source it automatically, so it is never run on its own.
-- `dataset-citation-finder.Rproj` is an RStudio project file. Opening it makes
-  the repository root the R working directory, which is what the scripts expect.
-- Because `.Renviron` is not committed, each user has to create their own to store 
-  environment variables for private settings such as their EDI API key.
-  
-To create `.Renviron`, from the repository root in RStudio:
-
-1. Open `dataset-citation-finder.Rproj`. (Tip: You can also create this file with a text editor if you want to skip RSudio for now)
-2. Run this command to initialize the file:
+Store keys in a local `.Renviron` file in the repository root, not in scripts.
+`.gitignore` excludes `.Renviron`. From RStudio:
 
 ```r
 file.edit(".Renviron")
 ```
 
-3. Add your own values, one per line:
+Add the keys you use, then save:
 
 ```text
 EDI_API_KEY="your_edi_key"
 OPENALEX_API_KEY="your_openalex_key"
 ```
 
-4. Save the file and restart R (**Session > Restart R**). 
-
-`config.R` reads the project `.Renviron` itself, so
-the keys are picked up even if the R session was started somewhere other than the
-repository root. Keys set as operating-system environment variables also work.
-
-5. Confirm the values are loaded without printing the secrets themselves:
+Restart R after editing. `config.R` also reads the project `.Renviron` itself,
+so keys are available when R started elsewhere. Operating-system environment
+variables also work. To check that a key is present without printing it:
 
 ```r
 nzchar(Sys.getenv("EDI_API_KEY"))
 nzchar(Sys.getenv("OPENALEX_API_KEY"))
 ```
 
-Each should return `TRUE` when configured.
+- **EDI:** `EDI_API_KEY` authenticates the EDI requests in scripts 01 and 02.
+  Registered EDI users can create access keys through the Identity and Access
+  Manager; see [EDI access-key instructions](https://edirepository.org/resources/iam).
+  Step 02 requires this key whenever `edi_scope` is configured.
+- **OpenAlex:** `OPENALEX_API_KEY` is recommended for the many discovery requests
+  in Step 02. Without it, the script attempts keyless requests and warns that
+  results may be incomplete because of rate limits. See
+  [OpenAlex authentication](https://help.openalex.org/api/authentication/) and
+  [account settings](https://openalex.org/settings/api).
+- **Zotero:** the current implementation uses unauthenticated group requests.
+  The configured group and publication collection must be publicly readable
+  through the Zotero API. Private-group authentication is not implemented.
 
-### Workflow scripts
+### Site settings
 
-The workflow scripts are in the `R/` folder and are numbered in their usual order
-of execution:
+| Setting | Purpose |
+| --- | --- |
+| `edi_scope` | EDI scope, such as `knb-lter-ble`. Set to `""` to skip EDI in both steps. |
+| `zotero_group_id` | Numeric Zotero group ID as a string; set to `""` to disable Zotero. |
+| `zotero_dataset_tag` | Tag identifying externally archived datasets for Step 01. Independent of the publication collection. |
+| `zotero_publication_collection_id` | Collection key identifying publications for Step 02. |
+| `deduplicate_on_dataset_id` | `TRUE` (default) merges dataset revisions per publication; `FALSE` matches exact dataset DOIs. |
+| `site_keywords` | Terms used for OpenAlex keyword discovery and PDF text searches. |
+| `output_dir` | Folder containing the input registry and generated results. |
+| `cache_max_age_days` | Maximum age of reusable OpenAlex search responses. |
 
-1. `01_get_dataset_dois.R` builds the dataset registry by retrieving dataset DOIs
-   from EDI and Zotero.
-2. `02_find_dataset_citations.R` searches for publications associated with those
-   datasets and checks available publication full text.
-3. `03_compare_zotero.R` compares the discovered relationships with the
-   publication information already recorded in Zotero.
-4. `04_create_zotero_publication_list.R` creates a comprehensive Zotero
-   publication list with available citation counts.
-5. `05_compare_edi_citations.R` compares the discovered relationships with the
-   journal citations recorded in EDI.
+Find the group ID in the group's web address. For example,
+`https://www.zotero.org/groups/2211939/ble_lter` has group ID `2211939`.
+Find the publication collection key by opening that collection on the web:
+`https://www.zotero.org/groups/lter-ble/collections/KHTHLKB5` has collection key
+`KHTHLKB5`. Use the key, not the collection's display name.
 
-### Output files
+BLE uses Zotero in two independent ways: a tag identifies datasets archived
+outside EDI, and a publication collection contains items whose Extra fields
+record dataset DOIs. You may configure either or both uses. Both use the same
+`zotero_group_id`.
 
-Results are written to the `Citation_finder_output` folder in the repository
-root. The folder is created the first time a script needs to save a file, and
-each script prints a message before creating it. Existing output files with the
-same names are overwritten, so move or rename an old report first if you need to
-keep it. The output location can be changed with `output_dir` in `config.R`.
+Replace the BLE `site_keywords` with your site's name, acronym, EDI scope,
+and other distinctive terms used in publications. These terms control the
+additional keyword/PDF search, not which datasets are in the registry.
 
-`.gitignore` excludes `Citation_finder_output/`, because every file in it is
-regenerated by the scripts and is specific to one site's configuration.
+Leave `deduplicate_on_dataset_id <- TRUE` if you want a dataset-level view
+across EDI revisions. Use `FALSE` if you need a separate result and count for
+each dataset DOI. [The worked example](#choosing-a-deduplication-mode)
+shows how this choice affects both the combined results and revision review.
 
-## What is the dataset registry?
+### How to record dataset links in Zotero
 
-The dataset registry is the main list of dataset DOIs that the rest of the
-workflow searches for. It is a single worksheet, `Data_Registry`, inside
-`Data_Registry.xlsx`. `R/01_get_dataset_dois.R` knows how to discover dataset
-DOIs from two sources:
+Step 02 reads the **Extra field of publication items** in the configured
+collection. Put the publication's own DOI in its DOI field. Put the DOIs of
+its cited datasets in Extra, for example:
 
-1. **EDI.** Every DOI-bearing revision in the EDI scope configured as
-   `edi_scope`.
-2. **Zotero.** Datasets cataloged in Zotero, found by looking for the Zotero
-   tag configured as `zotero_dataset_tag`. For example, BLE uses Zotero to
-   catalog datasets archived somewhere other than EDI.
+```text
+Dataset DOI: 10.1234/example-dataset-a
+Dataset DOI: https://doi.org/10.1234/example-dataset-b
+```
 
-Datasets archived anywhere else are not discovered automatically and have to be
-added to the registry manually.
+These are illustrative DOIs; use the actual dataset DOIs from your registry.
+Several dataset DOIs can appear in one Extra field. The text label is optional,
+and existing unrelated Extra text can remain. Dataset links recorded only in
+Zotero tags, notes, or Related items are not searched by this workflow.
 
-### How the Zotero source works when building the dataset registry
+## Step 01: build the dataset registry
 
-Using Zotero this way is a BLE convention rather than an LTER-wide requirement.
-BLE keeps a Zotero **group** whose items include datasets that BLE uses as well
-as datasets created by BLE which are NOT archived at EDI. BLE tags the latter
-in Zotero with `LTER-Funded Data at Other Archives`. `R/01_get_dataset_dois.R` 
-asks the Zotero API for items in that group carrying that tag, 
-and takes the DOI from each item's DOI or URL field.
+```r
+source("R/01_get_dataset_dois.R")
+```
 
-Two details matter for another site trying this:
+**Output:** `Citation_finder_output/Data_Registry.xlsx`, sheet `Data_Registry`.
+The default output folder is in the repository root.
 
-- The key Zotero config settings for finding datasets are the **group ID**
-  (`zotero_group_id`) (not a personal library or a collection) and **dataset tag**
-  (`zotero_dataset_tag`). The separate `zotero_publication_collection_id` setting is a
-  collection name, and it is used only by the publication-comparison scripts,
-  03 and 04.
+EDI harvesting includes every DOI-bearing revision in `edi_scope`. Zotero
+harvesting reads group items bearing `zotero_dataset_tag` and takes the dataset
+DOI from each item's DOI or URL field. This tagged-dataset convention is used
+by BLE; it is not required of other LTER sites.
 
-  The group ID is the number in the group's web address. Open the group from
-  **zotero.org > Groups** and read the number out of the URL:
+The registry columns are:
 
-  ```text
-  https://www.zotero.org/groups/2211939/ble_lter    ->  zotero_group_id <- "2211939"
-  ```
+- `Scope`, `Identifier`, `Revision`: EDI package components, when applicable.
+- `Package_ID`: full revisioned EDI ID, such as `knb-lter-ble.12.7`.
+- `Dataset_DOI`, `Dataset_Title`: normalized DOI and dataset title.
+- `Registry_Source`, `Registry_Category`: where the registry row came from.
+- `Zotero_Item_Key`: Zotero dataset item key, when applicable.
+- `Final_URL`: canonical dataset DOI URL.
 
-  It is a number, not the group name, and it goes in `config.R` as a quoted
-  string.
-- The requests are unauthenticated, so the group has to be publicly readable through
-  the Zotero API. A private group will not work without adding authentication.
+Step 01 treats its sources independently. If EDI scope/key settings are
+incomplete, it warns and skips EDI. If Zotero group/tag settings are incomplete,
+it warns and skips Zotero. If neither source is configured, it stops without
+writing a registry.
 
-Another site can point `zotero_dataset_tag` at whatever tag it uses, or leave the
-Zotero settings blank and build the registry from EDI alone.
+### Using a manually maintained registry
 
-### When a source is not configured
+Datasets in other repositories can be added manually. You can also skip Step 01
+entirely and create `Data_Registry.xlsx` in `output_dir`. Include a sheet named
+`Data_Registry` with these exact ten column headers (one column per name):
 
-EDI and Zotero are independent of each other in `R/01_get_dataset_dois.R`:
+```text
+Scope, Identifier, Revision, Dataset_Title, Package_ID, Dataset_DOI,
+Registry_Source, Registry_Category, Zotero_Item_Key, Final_URL
+```
 
-- If the EDI settings are incomplete, meaning `edi_scope` in `config.R` or
-  `EDI_API_KEY` in `.Renviron` is missing, the script says which one is missing,
-  warns, skips EDI, and builds the registry from Zotero.
-- If the Zotero settings are incomplete, meaning `zotero_group_id` or
-  `zotero_dataset_tag` is missing, the script warns, skips Zotero, and builds the
-  registry from EDI.
-- If both are incomplete, the script stops and lists the settings it needs. It
-  does not write an output file in that case.
+Each row needs a dataset DOI and title. Set `Registry_Source` to `Manual` or
+the repository name and `Final_URL` to the canonical `https://doi.org/<DOI>`
+address. EDI-specific fields and
+`Zotero_Item_Key` can be blank for externally archived datasets.
 
-The completion message reports which sources were actually used, so the row
-counts are not mistaken for a complete picture of the site's datasets.
+For EDI datasets, provide each revision's actual package ID and DOI. The full
+`Package_ID` supplies the scope, dataset identifier, and revision used for
+series matching and revision recommendations. Datasets without a valid
+revisioned package ID are matched by DOI.
 
-## Sites that do not use EDI or do not use Zotero
+Rerunning Step 01 replaces `Data_Registry.xlsx`, including manual additions.
+Keep a separate copy of your manually maintained data. If you refresh the
+registry with Step 01, reapply any manual additions before running Step 02.
 
-The citation search itself does not depend on EDI or Zotero. It only needs a
-dataset registry.
-
-### If your site does not use EDI or Zotero to catalog datasets
-
-Create `Data_Registry.xlsx` by hand, save it in the directory set by `output_dir`
-in `config.R`, and make sure the workbook contains a worksheet named
-`Data_Registry` with the same column names that `R/01_get_dataset_dois.R`
-produces:
-
-- `Scope`
-- `Identifier`
-- `Revision`
-- `Dataset_Title`
-- `Package_ID`
-- `Dataset_DOI`
-- `Registry_Source`
-- `Registry_Category`
-- `Zotero_Item_Key`
-- `Final_URL`
-
-The EDI-specific fields (`Scope`, `Identifier`, `Revision`, and `Package_ID`) can
-be left blank, and so can `Zotero_Item_Key`. At minimum every dataset needs a
-`Dataset_Title` and a `Dataset_DOI`. Set `Registry_Source` to something like
-`Manual` or the name of the repository holding the dataset, and set `Final_URL`
-to the canonical DOI URL, for example `https://doi.org/10.xxxx/example`.
-
-With that file in place, start the workflow at the second script:
+## Step 02: discover and reconcile citations
 
 ```r
 source("R/02_find_dataset_citations.R")
 ```
 
-Skip `R/05_compare_edi_citations.R`, because that report compares results with
-journal citations recorded in EDI.
+**Output:** `Citation_finder_output/Publication_Search_Results.xlsx`.
+This is the complete citation and curation report; there are no subsequent
+comparison scripts to run.
 
-## Before running the workflow
+The DataCite/OpenAlex searches and keyword/PDF checks run for the dataset
+registry. Optional sources are controlled independently:
 
-### 1. Clone or download the repository, then open the project
+- When `edi_scope` is set, retrieve EDI journal citations for registry dataset
+  series in that scope. A missing EDI key stops Step 02 before discovery.
+- When **both** `zotero_group_id` and `zotero_publication_collection_id` are set,
+  retrieve top-level items in that publication collection. Notes and attachments
+  are excluded. No dataset tag is required for this publication search.
+- When a service is disabled, its source and curation sheets are omitted.
+  A configured source with no records produces empty sheets with headers.
 
-Open the **repository root** in RStudio, not the `R/` subfolder. To do so, either
-double-click `dataset-citation-finder.Rproj`, or use
-`File > New Project > Existing Directory` and choose the `dataset-citation-finder`
-directory. Opening the project makes the repository root the working directory,
-which keeps the relative paths in the scripts predictable.
+A failed EDI request, inaccessible Zotero collection, or failed Zotero page
+request stops the run instead of producing a misleading missing-link report
+from incomplete catalog data. An existing results workbook is not replaced by
+that failed run; it still contains the previous results. Retry Step 02 after
+resolving the problem. PDF errors are recorded per candidate and discovery
+continues.
 
-### 2. Install the required R packages once
+### Reviewing the workbook
 
-From the repository root, run:
+| Start here | What to look for | Next action |
+| --- | --- | --- |
+| `Result_Counts` | How many publications were found for each dataset or series, including zeros | Check that the dataset coverage and chosen deduplication mode suit your reporting purpose. |
+| `Combined_Results` | Which publication cites which dataset, with supporting evidence | Filter by dataset, then inspect `Supporting_Sources` and `Found_By`. |
+| `DataCite_Citations`, `PDF_Citations`, and any EDI/Zotero source sheets | The original source evidence and dataset revision | Check the actual publication or catalog record before acting on a proposed link. |
+| The curation sheets | Publications, dataset links, or revisions that may need attention | Review and make any agreed changes manually in Zotero or EDI; rerun Step 02 to check the updated records. |
 
-```r
-source("setup.R")
-```
+A missing optional source sheet means that integration was disabled. Revision
+mismatch sheets also require series mode (`deduplicate_on_dataset_id <- TRUE`).
+An empty sheet for an enabled integration means no matching records or review
+items were found in that run. `PDF_Citations` also includes unsuccessful PDF
+checks; not every row in that source sheet is a confirmed citation.
 
-`setup.R` installs missing packages into your local R package library. It does
-not create any citation results. The workflow scripts load the packages they need
-but do not install them; if something is missing they stop and tell you to run
-`setup.R`.
+### Source sheets
 
-### 3. Edit `config.R`
+Source worksheets preserve revision-level evidence regardless of the
+`deduplicate_on_dataset_id` setting. Combining results never rewrites these
+sheets to the selected revision.
 
-Review the site-specific settings before running any workflow script:
+#### `DataCite_Citations`
 
-- `edi_scope` - the site's EDI scope, such as `knb-lter-ble`. Leave it blank to
-  skip EDI.
-- `zotero_group_id` - the Zotero group ID, or `""` if Zotero is not used. Find
-  the ID after logging in to zotero.org by clicking Groups > Your Group Name.
-  For example, BLE's group URL is `https://www.zotero.org/groups/2211939/lter-ble`
-  and the ID is `2211939`.
-- `zotero_publication_collection_id` - the Zotero collection holding publications,
-  used by scripts 03 and 04. To find the ID, from your group page at zotero.org,
-  select **Group Library**. Then select the collection and read the ID from the URL.
-  For example, BLE's publication collection URL is `https://www.zotero.org/groups/2211939/lter-ble/collections/KHTHLKB5/collection`
-  and the ID is `KHTHLKB5`.
-- `zotero_dataset_tag` - the Zotero tag marking datasets archived outside EDI,
-  used by script 01.
-- `publication_types` - the Zotero item types treated as publications.
-- `site_keywords` - site-specific terms used for OpenAlex keyword discovery and
-  for searching PDF text.
-- `output_dir` - where generated files are written.
+This sheet includes both DataCite and OpenAlex evidence; `Search_Source`
+identifies which service found each relationship.
+One row per paper DOI + dataset DOI discovered through those services:
 
-## Workflow
+- `Paper_DOI`, `Paper_Title`, `Year`: publication metadata.
+- `Dataset_Package_ID`, `Dataset_DOI`, `Dataset_Title`: dataset registry metadata.
+- `Search_Source`: `DataCite`, `OpenAlex`, or both.
+- `Search_Method`: the evidence method or methods.
 
-### 1. `R/01_get_dataset_dois.R`
+Methods are `Citation relationship` and `Exact relatedIdentifier` from DataCite,
+and `Citation graph`, `Dataset DOI text`, and `Final URL text` from OpenAlex.
+These methods supply different strengths of evidence and require review.
 
-Builds the dataset registry from EDI and from the configured Zotero
-external-dataset tag. See "When a source is not configured" above for what
-happens if one of the two sources is unavailable.
+#### `PDF_Citations`
 
-**Output:** `Citation_finder_output/Data_Registry.xlsx`
+These are papers discovered by **site-keyword searches** in OpenAlex. This is
+not a PDF check of every paper found by the dataset-DOI searches. Every keyword
+candidate is retained, including candidates with no accessible or readable PDF.
 
-Sheet `Data_Registry`, sorted by scope, identifier, revision, and dataset title:
+- `Paper_Title`, `Paper_DOI`, `Year`: candidate metadata.
+- `Discovery_Keyword`: configured terms that caused the candidate to be found.
+- `Matched_Site_Keyword`: site terms actually present in extracted PDF text.
+- `Dataset_DOI`, `Dataset_Title`: populated for exact registered dataset matches.
+- `Matched_Dataset_Reference`: dataset DOI, canonical final URL, or both.
+- `PDF_URL`, `PDF_Status`: the attempted PDF and check outcome.
 
-- `Scope` - EDI scope; blank for non-EDI datasets.
-- `Identifier` - EDI package identifier; blank for non-EDI datasets.
-- `Revision` - EDI package revision; blank for non-EDI datasets.
-- `Dataset_Title` - dataset title.
-- `Package_ID` - revisioned EDI package ID, where applicable.
-- `Dataset_DOI` - normalized dataset DOI.
-- `Registry_Source` - `EDI` or `Zotero`.
-- `Registry_Category` - source category; Zotero rows carry the configured
-  external tag.
-- `Zotero_Item_Key` - Zotero item key for externally archived datasets.
-- `Final_URL` - canonical `https://doi.org/<Dataset_DOI>` URL.
+`PDF_Status` distinguishes no direct OA URL, failed downloads, HTML responses,
+unreadable PDFs, extraction failures, no exact dataset match, and a confirmed
+exact dataset DOI/final URL. A site keyword alone does not create a combined
+dataset relationship. The console count of additional PDF-confirmed pairs
+excludes API-discovered pairs and never includes EDI-only or Zotero-only links.
 
-### 2. `R/02_find_dataset_citations.R`
+#### `EDI_Citations` (optional)
 
-Uses the dataset registry to discover paper-dataset relationships through
-DataCite and OpenAlex. Separately, it runs site-keyword searches in OpenAlex and
-checks PDF text for your dataset citations whenever OpenAlex supplies a PDF URL.
+Journal citations recorded in EDI, including links to different revisions of
+the same dataset. Each link is matched to its **exact** package ID in the
+registry. The revision shown is the one recorded in EDI, rather than an
+arbitrarily chosen revision of the dataset.
 
-As the code executes, do not be alarmed if you see "PDF error" messages. This just means the code could
-not read the PDF due to some issue with it, so it will skip it and continue to
-the next PDF.
+Columns include `Query_Package_ID`, `EDI_Package_ID`, `Dataset_Series_ID`,
+`Dataset_DOI`, `Dataset_Title`, `EDI_Citation_ID`, `Paper_DOI`,
+`EDI_Paper_Title`, `EDI_Article_URL`, and `Mapping_Status`.
 
+All returned records are retained, including citations without a paper DOI.
+An unrecognized package is labeled `Package not in registry`; its dataset DOI
+is left blank rather than replaced with a different revision's DOI. Such a
+record cannot add a DOI pair to the combined sheet, but can still support
+series-level revision review when another source supplies the relationship.
+Update the registry and rerun when necessary.
 
-**Outputs:**
+#### `Zotero_Citations` (optional)
 
-- `Citation_finder_output/Publication_Search_Results.xlsx`
-- `Citation_finder_output/openalex_cache.rds`, reused on later runs to reduce
-  repeated OpenAlex requests.
+One row per publication item + registered dataset DOI found in that item's
+**Extra** field. Matching uses extracted DOI tokens, normalized for case and
+DOI URL prefixes. A dataset DOI appearing only in another field does not count.
+The paper DOI comes from the item's DOI field, with its URL as a fallback.
 
-#### Sheet: `Publication_Search`
+Columns include `Zotero_Item_Key`, `Zotero_Item_URL`, `Zotero_Item_Type`,
+`Zotero_Extra`, `Paper_DOI`, `Paper_Title`, `Year`, `Dataset_DOI`,
+`Dataset_Package_ID`, `Dataset_Series_ID`, `Dataset_Revision`, and
+`Dataset_Title`.
 
-One row per unique `Paper_DOI` + `Dataset_DOI` discovered through API and
-metadata searches:
+Matches without a paper DOI remain visible for manual review. They cannot
+participate in automatic publication matching or add a combined DOI pair.
+A publication without a matching dataset DOI in Extra is not listed here,
+but its existence is still considered when finding missing publications and
+missing links. This is a dataset-link evidence sheet, not a full publication list.
 
-- `Paper_DOI` - normalized publication DOI.
-- `Paper_Title` - publication title, when available.
-- `Year` - publication year, when available.
-- `Dataset_Package_ID` - package ID from the registry, if available.
-- `Dataset_DOI` - dataset DOI associated with the publication.
-- `Dataset_Title` - dataset title from the registry.
-- `Search_Source` - which service supplied the evidence. The possible components
-  are `DataCite` and `OpenAlex`, and both can appear as `DataCite + OpenAlex`.
-- `Search_Method` - how the relationship was found. Multiple values are separated
-  by semicolons when the same relationship was found more than one way.
+### `Combined_Results`
 
-The `Search_Method` values mean:
+Each row represents **one dataset citation within one publication**, identified
+by paper DOI plus the dataset key for the selected deduplication mode. A paper
+citing several datasets therefore has several rows. Multiple sources confirming
+the same citation contribute provenance to one row rather than additional rows.
+This sheet combines DOI-bearing relationships from all enabled sources,
+including exact PDF-confirmed matches. Dataset columns appear first. It includes:
 
-- `Citation relationship` - DataCite returned a structured citation relationship.
-- `Exact relatedIdentifier` - DataCite returned a work whose related identifier
-  exactly matches the dataset DOI.
-- `Citation graph` - OpenAlex reports that the publication cites the OpenAlex work
-  associated with the dataset DOI.
-- `Dataset DOI text` - an OpenAlex search for the exact dataset DOI returned the
-  work.
-- `Final URL text` - an OpenAlex search for the canonical dataset DOI URL
-  returned the work.
+- `Paper_DOI`, `Paper_Title`, `Year`, `Publication_Type`: publication metadata.
+  Type is looked up through Crossref once per unique DOI per run and is blank
+  when unavailable. It is not a citation count.
+- `Dataset_DOI`, `Dataset_Package_ID`, `Dataset_Series_ID`, `Dataset_Revision`,
+  `Dataset_Title`: the selected dataset identity.
+- `Selected_Source`: the source that determines the chosen DOI/revision.
+- `Supporting_Sources`, `Found_By`: all contributing sources and evidence methods.
+- `Observed_Dataset_DOIs`, `Observed_Package_IDs`: the distinct identities present
+  in the grouped source evidence. Consult the source sheets for their exact
+  source-to-revision associations.
 
-These are discovery signals of differing strength, and all of them should be
-reviewed by a person before anything is curated in EDI or Zotero.
+### Choosing a deduplication mode
 
-#### Sheet: `PDF_Results`
+#### Series mode: `deduplicate_on_dataset_id <- TRUE` (default)
 
-This sheet contains **only papers discovered through the configured site-keyword
-searches in OpenAlex**. It is not a list of every PDF for every relationship in
-`Publication_Search`, and it does not PDF-check the papers found through the
-DataCite dataset-DOI searches. Every keyword candidate gets a row, including
-candidates whose PDF could not be read, so that `PDF_Status` explains what
-happened.
+Keep one row per **paper DOI + dataset series**. For EDI package
+`knb-lter-ble.12.7`, the series is `knb-lter-ble.12`. Scope is part of the key;
+dataset 12 at another site is a different dataset. In this example,
+`knb-lter-ble` is the scope, `12` is the dataset identifier, and `7` is the
+revision. Non-EDI datasets continue to match by dataset DOI.
 
-- `Paper_Title`, `Paper_DOI`, `Year` - candidate publication metadata.
-- `Discovery_Keyword` - the site keyword or keywords whose OpenAlex search
-  returned this paper as a candidate.
-- `Matched_Site_Keyword` - the site keyword or keywords actually found in the
-  extracted PDF text.
-- `Dataset_DOI`, `Dataset_Title` - filled in only when an exact registered
-  dataset reference is confirmed in the PDF text.
-- `Matched_Dataset_Reference` - whether the PDF contained the dataset DOI, the
-  canonical final URL, or both.
-- `PDF_URL` - the OpenAlex PDF URL used for the check.
-- `PDF_Status` - the result of the check.
+Choose the revision in this order: **DataCite, Zotero, EDI, OpenAlex, PDF**.
+OpenAlex/PDF supply the selected revision only when none of the first three
+sources supplies that paper-series relationship. Within a single source,
+choose the highest numeric revision, then use DOI ordering to break any tie.
+This rule chooses a preferred reported revision, not necessarily the newest
+revision in the registry or the revision the authors actually used.
 
-`Discovery_Keyword` and `Matched_Site_Keyword` are therefore two different
-things: the first records how the candidate was discovered, and the second
-records what the workflow actually found inside the PDF. A paper can be
-discovered by one keyword and contain a different one, or contain none at all if
-the PDF text could not be searched.
+For example, suppose Publication A links to these revisions:
 
-The possible `PDF_Status` values are `No direct OA PDF URL`,
-`PDF download failed`, `PDF URL returned HTML, not PDF`,
-`Downloaded URL is not a readable PDF`, `PDF text extraction failed`,
-`PDF searched: keyword may match, but no exact dataset DOI/final URL`, and
-`Confirmed: exact dataset DOI/final URL found`.
+| Source | Package ID |
+| --- | --- |
+| DataCite | `knb-lter-ble.12.6` |
+| EDI | `knb-lter-ble.12.7` |
+| Zotero | `knb-lter-ble.12.8` |
 
-#### Sheet: `Final_Relationships`
+The combined sheet has one row for Publication A and dataset 12, using the
+**DOI and package ID of revision 6**. All three sources remain in the provenance,
+and their individual worksheets still show revisions 6, 7, and 8. The review
+sheets recommend checking the EDI and Zotero links against revision 6.
 
-The combined, deduplicated paper-dataset relationship table used by the
-comparison scripts, 03 and 05. It contains the API and metadata relationships
-plus any additional exact relationships confirmed through PDF verification. Its
-columns are `Dataset_DOI`, `Paper_DOI`, `Paper_Title`, `Year`, and `Found_By`,
-where `Found_By` records the evidence behind the relationship.
+#### DOI mode: `deduplicate_on_dataset_id <- FALSE`
 
-`Final_Relationships` can legitimately have more rows than `Publication_Search`.
-If `Publication_Search` has fewer rows than `Final_Relationships`, the extra
-rows are paper-dataset pairs confirmed from PDF text but not returned
-by the DataCite or OpenAlex metadata searches. The script prints the count of
-PDF-only relationships and lists them in the R console, so the difference can be
-checked on any given run.
+Keep one row per **paper DOI + dataset DOI**. Repeated evidence for the same
+exact pair is combined, while different revision DOIs remain separate.
+The example above produces three rows, one for each revision's DOI.
 
-### 3. `R/03_compare_zotero.R`
+Curation reports use exact DOI matching too: a revision-8 Zotero link does not
+satisfy the revision-6 relationship. Missing exact links are reported, and
+revision-mismatch sheets are omitted because no single preferred revision is
+being imposed across those rows.
 
-Compares `Final_Relationships` with the configured Zotero publication collection
-and adds OpenAlex cited-by counts where a paper DOI is available. Use these
-results to see where you may want to update your Zotero publication collection,
-either by adding new publications, or adding linkages to cited datasets in the
-publication's Extra field.
-Skip this if you do not use Zotero for cataloging your site's publications.
+### `Result_Counts`
 
-**Output:** `Citation_finder_output/Zotero_Comparison.xlsx`
+This sheet appears immediately after `Combined_Results`. It includes every
+dataset or series in the registry, even when its `Citation_Count` is **zero**.
+A zero means the workflow found no DOI-bearing publication relationship in the
+sources searched during this run. It does not establish that the dataset has
+never been cited; missing metadata, inaccessible PDFs, and publications without
+DOIs can leave gaps.
 
-- `Zotero_For_Website` - the publications currently in the configured Zotero
-  collection, with item key, paper DOI, title and type, the dataset DOI evidence
-  found in the Extra field, and the cited-by count.
-- `Missing_From_Zotero` - a publication DOI that Citation Finder found and that is
-  not in the Zotero collection at all.
-- `Zotero_Missing_Data_DOI` - the publication is in Zotero, but the specific
-  `Paper_DOI` + `Dataset_DOI` relationship Citation Finder found is missing from
-  the Zotero Extra field.
-- `Zotero_Not_In_Search` - Zotero Extra records a paper-dataset relationship that
-  the automated search did not find.
+- In series mode (`TRUE`), count one citation per distinct publication DOI and
+  dataset series, using the dataset DOI instead when no valid package ID exists.
+- In DOI mode (`FALSE`), count one citation per distinct publication DOI and
+  dataset DOI. Different revision DOIs are counted separately.
+- Repeated mentions within a publication or evidence from multiple sources do
+  not increase a dataset's count. A publication citing two different datasets
+  contributes one citation to each dataset.
 
-Those three review categories are deliberately separate. A paper already in
-Zotero that is missing one dataset relationship belongs in
-`Zotero_Missing_Data_DOI`, not in `Missing_From_Zotero`.
+**Do not sum this column to obtain the number of unique publications.** The same
+publication can contribute to several datasets, and in DOI mode it can also
+contribute to several revisions of one dataset.
 
-### 4. `R/04_create_zotero_publication_list.R`
+Columns are `Dataset_Series_ID`, `Dataset_Package_ID`, `Dataset_DOI`,
+`Dataset_Title`, `Citation_Count`, `Registry_Dataset_DOIs`, and
+`Registry_Package_IDs`. The last two columns list all registry identities covered
+by the row. For a series-level count, the singular `Dataset_DOI` and
+`Dataset_Package_ID` fields are blank: different publications may have different
+preferred revisions, so the count belongs to the entire series. DOI-level rows
+show their individual DOI and package ID, if available.
 
-Creates a human-readable publication list from the configured Zotero publication collection.
-Use these results for annual reports to list publications related to your site.
-Skip this if you do not use Zotero for cataloging your site's publications.
+Both `Combined_Results` and `Result_Counts` are sorted by package ID in DOI mode
+or series ID in series mode. Scope is sorted alphabetically, then the dataset
+identifier and applicable revision are sorted numerically: `knb-lter-ble.2`
+comes before `knb-lter-ble.13`, and revision 2 comes before revision 13.
+Datasets without package IDs follow, sorted by DOI.
 
-**Output:** `Citation_finder_output/Zotero_Comprehensive_Publication_List.xlsx`
+### Curation sheets
 
-Sheet `Zotero_Publications`:
+These are review lists for changes you may want to make in your catalogs.
+They use the same EDI and Zotero records as the source sheets from this run.
+Reports are produced only for enabled services, and EDI reports are limited to
+datasets in the configured EDI scope.
 
-- `Paper_Title` - the Zotero title.
-- `Paper_Authors` - authors separated by semicolons.
-- `Paper_DOI` - publication DOI, when present.
-- `Publication_Category` - `Foundational`, `Supported`, or both, based on those
-  Zotero tags.
-- `Dataset_DOIs` - dataset DOIs found in the Extra field, separated by semicolons
-  when there is more than one.
-- `Cited_By_Count` - the OpenAlex citation count for the publication DOI; blank
-  when no DOI or no OpenAlex match is available.
+| Sheet | What it means | What to do after checking the evidence |
+| --- | --- | --- |
+| `Missing_From_Zotero` | The publication DOI was not found in the configured collection. A paper can have several rows if it cites several datasets. | Check for an existing item elsewhere in your group or an item lacking its DOI before creating a duplicate. Add the paper to the collection and record its dataset links as appropriate. |
+| `Zotero_Missing_Data_DOI` | The publication is in the collection, but its Extra field does not contain the expected dataset link. | Locate the listed item and add the recommended dataset DOI if the relationship is supported. |
+| `Zotero_Revision_Mismatches` | Series mode only: a Zotero link differs from the revision selected by source priority. | Compare recorded and recommended DOIs with the publication before changing the Extra field. |
+| `EDI_Missing_Links` | No EDI journal citation matches the expected relationship at the selected dataset/series level. | Check the publication, then add the appropriate journal citation through your normal EDI curation process. |
+| `EDI_Revision_Mismatches` | Series mode only: an EDI link has a different or unresolved revision. | Check the recorded package and recommended package against the publication before revising the EDI link. |
 
-### 5. `R/05_compare_edi_citations.R`
+Reports include `Recommended_Package_ID` and `Recommended_Dataset_DOI`, plus
+the publication and dataset metadata and evidence supporting the recommendation.
+Link review sheets also provide `Recorded_Package_ID`, `Recorded_Dataset_DOI`,
+`Review_Status`, and the relevant `Zotero_Item_Key` or `EDI_Citation_ID`.
+Missing-link Zotero rows provide existing publication item keys to help locate
+the Extra field; there may be several keys if the collection duplicates a paper.
 
-The dataset landing page in EDI can include journal articles that cite the data.
-This part of the workflow retrieves the journal citations recorded in EDI and compares exact
-`dataset series + paper DOI` relationships with Citation Finder results. It does
-not create or modify EDI journal citations. Use these results to
-identify where to update associated journal articles for datasets in EDI.
-Results may also indicate dataset-paper relationships that were already set
-in EDI, but were not found by Dataset Citation Finder in the previous steps.
+In series mode, a known different revision appears in the mismatch sheet rather
+than the missing-link sheet. A different-revision link is still reported if
+the selected revision is also linked, so all links that need review remain
+visible. Unknown EDI revisions are labeled `Review unresolved revision`
+instead of guessed.
 
-**Output:** `Citation_finder_output/EDI_Journal_Citation_Comparison.xlsx`
+Matching publications requires a paper DOI. No title-only matching is attempted;
+items lacking a DOI can therefore require manual reconciliation even when a
+similar title appears in a report. Recommended revisions reflect the configured
+source priority and should be checked before changing catalog records.
+A revision mismatch is not proof that a catalog entry is wrong: a publication
+may legitimately cite an older revision or more than one revision. Keep a
+supported link even if another source supplies the workflow's preferred DOI.
 
-Sheet `EDI_Citation_Comparison`:
+## Run order and output handling
 
-- `Dataset_Package_ID` - the dataset series identifier used for the comparison.
-- `Dataset_DOI` - the DOI of the EDI package or revision, when available.
-- `Dataset_Title` - dataset title.
-- `Paper_DOI` - publication DOI; can be blank for an EDI citation that has none.
-- `Paper_Title` - publication title.
-- `Year` - publication year, when Citation Finder supplied one.
-- `EDI_Citation_ID` - the EDI journal citation identifier, when present.
-- `EDI_Status` - the comparison result.
-
-The `EDI_Status` values are:
-
-- `Already in EDI` - the exact dataset series and paper DOI pair appears in both
-  Citation Finder and EDI.
-- `Missing from EDI` - Citation Finder found the relationship but EDI does not
-  contain that exact pair. Verify it manually before adding anything to EDI.
-- `In EDI - Not in Citation Finder` - EDI contains a citation for the dataset, but
-  Citation Finder did not find the same dataset and paper DOI relationship. EDI
-  citations with no paper DOI also get this status, because they cannot be matched
-  automatically by DOI.
-
-## Recommended run order
-
-For the main discovery and Zotero-comparison workflow:
+From the repository root:
 
 ```r
 source("R/01_get_dataset_dois.R")
 source("R/02_find_dataset_citations.R")
-source("R/03_compare_zotero.R")
 ```
 
-Then run either or both of the additional reports as needed:
+With a manually maintained registry, run only Step 02. Clear `edi_scope` to
+skip EDI, and clear the Zotero publication settings to skip Zotero. DataCite,
+OpenAlex, and PDF discovery remain available without those catalog integrations.
+
+The output directory is created as needed. Existing output files with the same
+names are overwritten after a successful run, so copy reports you need to keep
+before rerunning. Existing comparison workbooks from the old workflow are not
+updated by Step 02. Generated files are specific to the site's configuration
+and should not be committed. The repository's `.gitignore` excludes the default
+`Citation_finder_output` folder and everything inside it. If you change
+`output_dir` to another folder inside the repository, add that folder to
+`.gitignore` as well.
+
+OpenAlex responses are reused until `cache_max_age_days` expires. Lower that
+value to refresh searches sooner, or use `Inf` to keep cached responses
+indefinitely. EDI and Zotero are refreshed on every Step 02 run. API discovery,
+keyword matches, and exact catalog/PDF evidence differ in strength; review the
+source sheets before curating any external records.
+
+## Common questions and troubleshooting
+
+| Situation | What to check |
+| --- | --- |
+| R cannot find `config.R` or a script | Open the project and run commands from the repository root. |
+| R reports a missing package | Run `source("setup.R")`, then retry. |
+| Step 02 cannot find `Data_Registry.xlsx` | Run Step 01 or put the manually maintained registry in the configured `output_dir`. |
+| Step 01 skipped EDI, but Step 02 stops for a missing EDI key | Step 01 can continue with another registry source. Step 02 requires `EDI_API_KEY` whenever `edi_scope` is set; provide the key or clear the scope. |
+| Zotero retrieval fails | Check the group ID, collection key, and whether the group is publicly readable through the API. |
+| An optional source or curation sheet is absent | Check the source settings. Revision-mismatch sheets also require `deduplicate_on_dataset_id <- TRUE`. |
+| An EDI row says `Package not in registry` | Refresh the registry, preserving any manual additions, then rerun Step 02. The report does not substitute another revision's DOI. |
+| A PDF could not be downloaded or read | Inspect `PDF_Status`. Other candidates are still processed; the publication may need manual checking. |
+| A new publication does not appear | Check that the cited dataset DOI is in the registry, review the OpenAlex cache age, and consider gaps in source metadata or PDF access. |
+| The workbook still shows an earlier run | Confirm that Step 02 finished with `Saved results:`. A failed catalog retrieval leaves the previous workbook in place. Close the file in Excel before rerunning. |
+
+## Repository structure
+
+- `config.R` contains site settings, matching options, output paths, and API-key
+  loading. Edit this file for your site.
+- `setup.R` installs the required R packages once.
+- `R/01_get_dataset_dois.R` creates `Data_Registry.xlsx`.
+- `R/02_find_dataset_citations.R` creates `Publication_Search_Results.xlsx`
+  and maintains `openalex_cache.rds`.
+- `R/utils.R` contains shared request, normalization, evidence-merging, and
+  comparison helpers. The scripts source it automatically.
+- `dataset-citation-finder.Rproj` opens the repository as an RStudio project.
+- `tests/2026-09-25_citation-results.R` contains offline regression checks for
+  citation matching and review reports.
+
+The former scripts 03 and 05 have been incorporated into Step 02. Script 04,
+which produced a publication list with citation counts, has been removed.
+The separate Zotero and EDI comparison workbooks are no longer generated.
+Older output files are not deleted automatically; regenerate Step 02 and use
+its workbook for current results. `Combined_Results` replaces `Full_Results`
+(previously named `Final_Relationships`).
+
+## Offline regression checks (for maintainers)
+
+When R and the project packages are available, run from the repository root:
 
 ```r
-source("R/04_create_zotero_publication_list.R")
-source("R/05_compare_edi_citations.R")
+source("tests/2026-09-25_citation-results.R")
 ```
 
-Scripts 03, 04, and 05 all depend on output from the earlier steps, so run 01 and
-02 first.
-
-## Review before curation
-
-The workflow is designed to support citation discovery and review, not to make
-unattended changes to Zotero or EDI. DataCite and OpenAlex metadata
-relationships, keyword matches, and PDF matches are evidence of different
-strengths. Review the results before adding, removing, or modifying citation
-records in another system.
-
-## About Refreshing OpenAlex Caches
-
-OpenAlex may limit the number of requests you can make. Therefore, this workflow
-saves a cache of OpenAlex search results. If you know of a new paper that was
-published which is not showing up in the output of this workflow, you may want
-to update settings on maximum cache age or delete the cache files to ensure
-the outputs reflect the latest available publication-dataset relationships.
-
-See comments for the `cache_max_age_days` and `zotero_comparison_cache_max_age_days`
-parameters in config.R for more information.
+These fixtures exercise both deduplication modes, source precedence,
+revision-specific EDI mapping, Zotero Extra matching, empty results, and
+missing/mismatched link reports, citation counts including zeros, numeric
+dataset ordering, and workbook sheet order without API requests or workbook writes.
 
 ## Contributing
 
-When updating the code and publishing a new release, also update the
-"Last updated" date at the top of this README.
+When updating the code and publishing a new release, update the "Last updated"
+date at the top of this README.
