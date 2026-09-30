@@ -2,7 +2,7 @@
 
 An R workflow for finding publications associated with each LTER dataset.
 
-Last updated: 2026-09-25
+Last updated: 2026-09-30
 
 Originally created by the Beaufort Lagoon Ecosystems (BLE) LTER.
 

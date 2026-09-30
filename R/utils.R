@@ -35,7 +35,7 @@ citation_finder_packages <- c(
 load_citation_finder_packages <- function() {
   installed <- rownames(installed.packages())
   missing <- setdiff(citation_finder_packages, installed)
-
+  
   if (length(missing)) {
     stop(
       paste0(
@@ -47,7 +47,7 @@ load_citation_finder_packages <- function() {
       call. = FALSE
     )
   }
-
+  
   invisible(
     lapply(
       citation_finder_packages,
@@ -81,13 +81,13 @@ ensure_output_dir <- function(path = output_dir) {
 # tell the user what to rerun.
 
 prepare_xlsx_for_read <- function(xlsx_file, created_by = NULL) {
-
+  
   rerun_hint <- if (is.null(created_by)) {
     ""
   } else {
     paste0(" Rerun ", created_by, " to recreate it.")
   }
-
+  
   if (!file.exists(xlsx_file)) {
     stop(
       paste0(
@@ -99,9 +99,9 @@ prepare_xlsx_for_read <- function(xlsx_file, created_by = NULL) {
       call. = FALSE
     )
   }
-
+  
   file_size <- file.info(xlsx_file)$size
-
+  
   if (is.na(file_size) || file_size <= 0) {
     stop(
       paste0(
@@ -114,7 +114,7 @@ prepare_xlsx_for_read <- function(xlsx_file, created_by = NULL) {
       call. = FALSE
     )
   }
-
+  
   valid_zip <- tryCatch(
     {
       utils::unzip(
@@ -126,7 +126,7 @@ prepare_xlsx_for_read <- function(xlsx_file, created_by = NULL) {
     warning = function(w) FALSE,
     error = function(e) FALSE
   )
-
+  
   if (!valid_zip) {
     stop(
       paste0(
@@ -139,18 +139,18 @@ prepare_xlsx_for_read <- function(xlsx_file, created_by = NULL) {
       call. = FALSE
     )
   }
-
+  
   local_copy <- file.path(
     tempdir(),
     basename(xlsx_file)
   )
-
+  
   copied <- file.copy(
     from = xlsx_file,
     to = local_copy,
     overwrite = TRUE
   )
-
+  
   if (!isTRUE(copied)) {
     stop(
       paste0(
@@ -162,7 +162,7 @@ prepare_xlsx_for_read <- function(xlsx_file, created_by = NULL) {
       call. = FALSE
     )
   }
-
+  
   local_copy
 }
 
@@ -177,7 +177,7 @@ clean_doi <- function(x) {
   if (is.null(x) || !length(x)) {
     return(NA_character_)
   }
-
+  
   x <- tolower(trimws(as.character(x)))
   x <- stringr::str_remove(x, "^https?://(dx\\.)?doi\\.org/")
   x <- stringr::str_remove(x, "^doi:\\s*")
@@ -190,7 +190,7 @@ extract_dois <- function(x) {
   if (is.null(x) || !length(x) || all(is.na(x))) {
     return(character())
   }
-
+  
   hits <- stringr::str_extract_all(
     paste(x, collapse = " "),
     stringr::regex(
@@ -198,7 +198,7 @@ extract_dois <- function(x) {
       ignore_case = TRUE
     )
   )[[1]]
-
+  
   cleaned <- clean_doi(hits)
   unique(cleaned[!is.na(cleaned)])
 }
@@ -214,14 +214,14 @@ get_json <- function(url, query = list(), attempts = 4, user_agent = "LTER-datas
       ),
       error = function(e) NULL
     )
-
+    
     if (is.null(response)) {
       Sys.sleep(min(15, 2^i))
       next
     }
-
+    
     status <- httr::status_code(response)
-
+    
     if (status == 200) {
       data <- tryCatch(
         jsonlite::fromJSON(
@@ -230,10 +230,10 @@ get_json <- function(url, query = list(), attempts = 4, user_agent = "LTER-datas
         ),
         error = function(e) NULL
       )
-
+      
       return(list(ok = !is.null(data), data = data, status = status))
     }
-
+    
     if (status == 429) {
       waits <- c(10, 20, 30)
       if (i > length(waits)) break
@@ -241,22 +241,22 @@ get_json <- function(url, query = list(), attempts = 4, user_agent = "LTER-datas
       Sys.sleep(waits[i])
       next
     }
-
+    
     if (status %in% c(500, 502, 503, 504)) {
       Sys.sleep(min(20, 2^i))
       next
     }
-
+    
     return(list(ok = FALSE, data = NULL, status = status))
   }
-
+  
   list(ok = FALSE, data = NULL, status = NA_integer_)
 }
 
 paginate_json <- function(url, extra = list(), user_agent = "LTER-dataset-citation-finder", strict = FALSE) {
   out <- list()
   start <- 0
-
+  
   repeat {
     response <- get_json(
       url,
@@ -266,7 +266,7 @@ paginate_json <- function(url, extra = list(), user_agent = "LTER-dataset-citati
       ),
       user_agent = user_agent
     )
-
+    
     if (!response$ok || is.null(response$data)) {
       if (strict) {
         stop("Zotero retrieval failed at offset ", start,
@@ -276,20 +276,20 @@ paginate_json <- function(url, extra = list(), user_agent = "LTER-dataset-citati
       }
       break
     }
-
+    
     if (!length(response$data)) {
       break
     }
-
+    
     out <- append(out, response$data)
-
+    
     if (length(response$data) < 100) {
       break
     }
-
+    
     start <- start + 100
   }
-
+  
   out
 }
 
@@ -307,7 +307,7 @@ oa_query <- function(q) {
   if (!is.null(key) && nzchar(key)) {
     q$api_key <- key
   }
-
+  
   get_json(
     "https://api.openalex.org/works",
     q,
@@ -320,7 +320,7 @@ oa_query <- function(q) {
 dataset_series_id <- function(package_id) {
   if (!length(package_id)) return(character())
   parts <- stringr::str_match(as.character(package_id),
-                             "^([^.]+)\\.([0-9]+)\\.([0-9]+)$")
+                              "^([^.]+)\\.([0-9]+)\\.([0-9]+)$")
   ifelse(is.na(parts[, 1]), NA_character_, paste(parts[, 2], parts[, 3], sep = "."))
 }
 
@@ -434,7 +434,7 @@ count_dataset_citations <- function(combined_results, registry, deduplicate_on_d
     )) %>%
     dplyr::distinct(Paper_DOI, Dataset_Key) %>%
     dplyr::count(Dataset_Key, name = "Citation_Count")
-
+  
   registry %>%
     dplyr::mutate(Dataset_Key = citation_dataset_key(
       Dataset_DOI, Dataset_Series_ID, deduplicate_on_dataset_id
@@ -464,6 +464,14 @@ count_dataset_citations <- function(combined_results, registry, deduplicate_on_d
 # Exact DOI tokens in Extra, not substring matches and not arbitrary URLs.
 # No-paper-DOI matches remain in the source sheet for manual review.
 extract_zotero_citations <- function(publications, registry) {
+  if (!nrow(publications)) {
+    return(
+      publications %>%
+        dplyr::mutate(Dataset_DOI = character()) %>%
+        dplyr::inner_join(registry, by = "Dataset_DOI")
+    )
+  }
+  
   publications %>%
     dplyr::mutate(Dataset_DOI = purrr::map(Zotero_Extra, extract_dois)) %>%
     tidyr::unnest_longer(Dataset_DOI, ptype = character()) %>%
@@ -486,7 +494,7 @@ map_edi_citations <- function(citations, registry, query_package_id) {
       Query_Package_ID = query_package_id,
       EDI_Package_ID = dplyr::na_if(trimws(as.character(packageId)), ""),
       Dataset_Series_ID = dplyr::coalesce(dataset_series_id(EDI_Package_ID),
-                                         dataset_series_id(query_package_id)),
+                                          dataset_series_id(query_package_id)),
       EDI_Citation_ID = as.character(journalCitationId),
       Paper_DOI = clean_doi(articleDoi),
       EDI_Paper_Title = dplyr::na_if(trimws(as.character(articleTitle)), ""),
@@ -518,7 +526,7 @@ catalog_link_review <- function(expected, observed, deduplicate_on_dataset_id) {
       Recommended_Package_ID = Dataset_Package_ID,
       Selected_Source, Found_By
     )
-
+  
   links <- observed %>%
     dplyr::filter(!is.na(Paper_DOI)) %>%
     dplyr::mutate(Dataset_Key = citation_dataset_key(
@@ -531,7 +539,7 @@ catalog_link_review <- function(expected, observed, deduplicate_on_dataset_id) {
       Has_Record = TRUE
     ) %>%
     dplyr::distinct()
-
+  
   targets %>%
     dplyr::left_join(links, by = c("Paper_DOI", "Dataset_Key")) %>%
     dplyr::mutate(
