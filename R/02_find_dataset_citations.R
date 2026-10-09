@@ -140,17 +140,20 @@ first_int <- function(x) {
 
 is_pub <- function(type) {
   
-  type %in%
-    c(
-      "article",
-      "review",
-      "preprint",
-      "book-chapter",
-      "proceedings-article",
-      "report"
-    )
+  allowed_types <- c(
+    "article",
+    "review",
+    "book-chapter",
+    "proceedings-article",
+    "report"
+  )
+  
+  if (isTRUE(include_preprints)) {
+    allowed_types <- c(allowed_types, "preprint")
+  }
+  
+  type %in% allowed_types
 }
-
 
 empty_search <- function() {
   
@@ -2807,6 +2810,15 @@ publication_types <- combined_results %>%
   distinct(Paper_DOI) %>%
   mutate(Publication_Type = purrr::map_chr(Paper_DOI, get_publication_type))
 combined_results <- combined_results %>% left_join(publication_types, by = "Paper_DOI")
+
+# Exclude preprints from combined results when disabled
+if (!isTRUE(include_preprints)) {
+  combined_results <- combined_results %>%
+    dplyr::filter(
+      is.na(Publication_Type) |
+        tolower(trimws(Publication_Type)) != "preprint"
+    )
+}
 
 # ================================================================
 # 24. ZOTERO CURATION SHEETS (ONLY WHEN ZOTERO IS CONFIGURED)

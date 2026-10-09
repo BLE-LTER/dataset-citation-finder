@@ -81,6 +81,14 @@ zotero_dataset_tag <- "LTER-Funded Data at Other Archives"
 
 deduplicate_on_dataset_id <- TRUE
 
+# ------------------------------------------------
+# PREPRINT SETTINGS
+# ------------------------------------------------
+# TRUE: Include preprints in citation results.
+# FALSE: Exclude preprints from citation results.
+
+include_preprints <- FALSE
+
 
 # ------------------------------------------------
 # SITE-SPECIFIC SEARCH TERMS
