@@ -2,7 +2,7 @@
 
 An R workflow for finding publications associated with each LTER dataset.
 
-Last updated: 2026-10-09
+Last updated: 2026-11-20
 
 Originally created by the Beaufort Lagoon Ecosystems (BLE) LTER.
 
@@ -97,6 +97,7 @@ Add the keys you use, then save:
 
 ```text
 EDI_API_KEY="your_edi_key"
+EDI_PERSONAL_API_KEY="your_personal_edi_key_for_step_03"
 OPENALEX_API_KEY="your_openalex_key"
 ```
 
@@ -106,6 +107,7 @@ variables also work. To check that a key is present without printing it:
 
 ```r
 nzchar(Sys.getenv("EDI_API_KEY"))
+nzchar(Sys.getenv("EDI_PERSONAL_API_KEY"))
 nzchar(Sys.getenv("OPENALEX_API_KEY"))
 ```
 
@@ -113,6 +115,10 @@ nzchar(Sys.getenv("OPENALEX_API_KEY"))
   Registered EDI users can create access keys through the Identity and Access
   Manager; see [EDI access-key instructions](https://edirepository.org/resources/iam).
   Step 02 requires this key whenever `edi_scope` is configured.
+- **EDI personal upload key:** `EDI_PERSONAL_API_KEY` is used **only by Step 03
+  upload mode**. Create a key for your own EDI account and ensure that account
+  has permission to create journal citations (including vetted-group membership
+  if required). A successful login alone does not prove upload permission.
 - **OpenAlex:** `OPENALEX_API_KEY` is recommended for the many discovery requests
   in Step 02. Without it, the script attempts keyless requests and warns that
   results may be incomplete because of rate limits. See
@@ -475,6 +481,167 @@ A revision mismatch is not proof that a catalog entry is wrong: a publication
 may legitimately cite an older revision or more than one revision. Keep a
 supported link even if another source supplies the workflow's preferred DOI.
 
+## Step 03: review and add EDI citations
+
+**Warning: upload mode writes journal citation records to EDI PRODUCTION.**
+Only run it if you are authorized to curate citations for the target EDI scope.
+The script does not automatically verify that a paper cites the dataset; a
+person must check the publication and exact recommended dataset/package first.
+This step is optional and applies to EDI citations, not Zotero records.
+
+### Prerequisites
+
+1. Complete Step 02 successfully. The output workbook must contain an
+   `EDI_Missing_Links` sheet with at least one row and the `Paper_DOI` and
+   `Recommended_Package_ID` columns. EDI must be enabled in `config.R` to
+   produce this curation sheet. If there are no missing links, there is nothing
+   for Step 03 to review or upload.
+2. Run from the repository root (the folder with `config.R`). Ensure the R
+   packages `EDIutils`, `openxlsx`, `httr`, and `jsonlite` are installed; use
+   `source("setup.R")` for the project's normal package setup and install any
+   missing Step 03 packages if necessary.
+3. Have an EDI account with permission to create journal citations in the
+   relevant scope. Confirm the account's required vetted-group membership or
+   other write authorization with your EDI administrator before uploading.
+
+### Create and configure a personal EDI API key
+
+1. Sign in to the [EDI Identity and Access Manager](https://edirepository.org/resources/iam)
+   with **your own EDI account**. Follow its current instructions to create an
+   access/API key for that account. Copy the generated key and store it securely;
+   do not include it in Git commits, scripts, screenshots, or issue reports.
+2. In RStudio, open the local project environment file:
+
+   ```r
+   file.edit(".Renviron")
+   ```
+
+3. Add the following entries, replacing the placeholders with your real keys:
+
+   ```text
+   EDI_API_KEY="key_for_steps_01_and_02"
+   EDI_PERSONAL_API_KEY="your_personal_edi_api_key"
+   ```
+
+   Keep `EDI_API_KEY` for Steps 01/02; **Step 03 uses only
+   `EDI_PERSONAL_API_KEY` to upload**. 
+
+4. Save `.Renviron` and restart the R session. Verify that the personal key is
+   available
+
+   ```r
+   nzchar(Sys.getenv("EDI_PERSONAL_API_KEY"))
+   ```
+
+   This should return `TRUE`. If it returns `FALSE`, check the filename,
+   spelling, project location, and whether you restarted R. Having a key does
+   not itself grant write permission; confirm your account's EDI authorization.
+
+### A. Generate the review workbook (no EDI changes)
+
+From the RStudio **Console** in the repository root:
+
+```r
+Sys.unsetenv("EDI_CITATION_MODE")  # default is review mode
+source("R/03_review_and_add_edi_citations.R")
+```
+
+Step 03 reads `Citation_finder_output/Publication_Search_Results.xlsx`, sheet
+`EDI_Missing_Links`, normalizes DOIs and package IDs, and retrieves article and
+journal metadata from Crossref when available. It creates:
+
+`Citation_finder_output/EDI_Citation_Review.xlsx`
+
+The workbook contains a `Review` sheet and an `Instructions` sheet. Every row
+starts with `Approved = No`; `Relation_Type` is set to `IsCitedBy`. Review each
+paper (including its text or references), verify that it **explicitly cites the
+recommended EDI dataset and correct revision**, and change `Approved` to `Yes`
+only when the link is supported. Use `Reviewer_Notes` to document decisions.
+Save and **close the Excel workbook** before upload mode.
+
+**Do not delete an existing review workbook.** Review mode intentionally stops
+if `EDI_Citation_Review.xlsx` already exists so that previous decisions are not
+overwritten. To generate a new one, first rename or archive the old workbook
+(e.g., `EDI_Citation_Review_Backup.xlsx`). If Step 02 has not been
+rerun with updated findings, regenerating the review workbook may reproduce the
+same candidate rows.
+
+### B. Upload approved citations to EDI production
+
+Before proceeding, verify the approved rows and your personal account's write
+permissions. **Preserve any existing `EDI_Citation_Upload_Log.csv`** by moving
+or renaming it; the script refuses to run upload mode while that filename
+exists. Archiving the log does not authorize a repeat upload. The script checks
+existing EDI citations and skips matching DOIs, but reviewers should still
+avoid approving already-uploaded links.
+
+Run these commands in the **RStudio Console**:
+
+```r
+Sys.setenv(EDI_CITATION_MODE = "upload")
+source("R/03_review_and_add_edi_citations.R")
+```
+
+The script reads the `Review` sheet, selects only `Approved = Yes` rows,
+validates the DOI, package ID, and `IsCitedBy` relation, checks for duplicate
+approved pairs, and confirms that the personal API key is present. It then
+prints the number of approved rows and indicates that the destination is
+production.
+
+To start the upload, type this command **directly in the Console** 
+
+```r
+upload_approved()
+```
+
+At the prompt `Type UPLOAD TO EDI PRODUCTION to continue:`, type exactly:
+
+```text
+UPLOAD TO EDI PRODUCTION
+```
+
+Press Enter. Any other response cancels the operation. The script logs in using
+`EDI_PERSONAL_API_KEY`, checks EDI for existing citations on each package, and
+calls `EDIutils::create_journal_citation()` for approved DOI/package pairs not
+already found. It logs out when the function finishes.
+
+### C. Inspect the upload audit log and verify in EDI
+
+The script writes:
+
+`Citation_finder_output/EDI_Citation_Upload_Log.csv`
+
+Check the result for **each** citation; a final `Finished` message does not
+prove that every upload succeeded:
+
+```r
+log <- read.csv("Citation_finder_output/EDI_Citation_Upload_Log.csv")
+View(log)
+```
+
+| `Status` | Meaning | Next action |
+| --- | --- | --- |
+| `UPLOADED` | EDI accepted the creation request; `EDI_Citation_ID` records the returned ID. | Verify the citation in the EDI portal. |
+| `SKIPPED_ALREADY_EXISTS` | A matching DOI was already returned for that package. | No new upload is needed; verify if necessary. |
+| `CHECK_FAILED` | Existing EDI citations could not be checked reliably. | Investigate the error in `Details`; do not assume a missing link. |
+| `UPLOAD_FAILED` | EDI rejected or could not complete the upload request. | Read `Details`, check permissions and input, and verify EDI before retrying. |
+
+The log also contains `Package_ID`, `Paper_DOI`, and `Relation_Type`. Keep the
+review workbook and audit log as records of your curation decisions. After
+checking the log, confirm the citation in the EDI dataset's **Journal Citations**
+section or query the existing citations through `EDIutils`.
+
+When finished, return to the default mode:
+
+```r
+Sys.unsetenv("EDI_CITATION_MODE")
+```
+
+**Re-running Step 03:** Archive the existing review workbook before creating a
+new review workbook, and archive the existing upload log before a new upload
+batch. Do not delete audit records or re-upload a citation just to regenerate
+files. Rerun Step 02 first if you need refreshed missing-link recommendations.
+
 ## Run order and output handling
 
 From the repository root:
@@ -483,6 +650,8 @@ From the repository root:
 source("R/01_get_dataset_dois.R")
 source("R/02_find_dataset_citations.R")
 ```
+If you want to upload missing EDI links, follow the optional
+[Step 03 instructions](#step-03-review-and-add-edi-citations) after Step 02.
 
 With a manually maintained registry, run only Step 02. Clear `edi_scope` to
 skip EDI, and clear the Zotero publication settings to skip Zotero. DataCite,
@@ -517,6 +686,12 @@ source sheets before curating any external records.
 | A PDF could not be downloaded or read | Inspect `PDF_Status`. Other candidates are still processed; the publication may need manual checking. |
 | A new publication does not appear | Check that the cited dataset DOI is in the registry, review the OpenAlex cache age, and consider gaps in source metadata or PDF access. |
 | The workbook still shows an earlier run | Confirm that Step 02 finished with `Saved results:`. A failed catalog retrieval leaves the previous workbook in place. Close the file in Excel before rerunning. |
+| Step 03 says the review workbook already exists | Archive or rename `EDI_Citation_Review.xlsx` before generating a new one; preserve previous approval decisions. |
+| Step 03 says the upload log already exists | Archive or rename `EDI_Citation_Upload_Log.csv` before a new batch; do not discard audit history. |
+| Step 03 cannot find `EDI_Missing_Links` or reports no missing links | Check that Step 02 completed with EDI enabled and produced the required sheet and candidate rows. |
+| Personal EDI API key is missing | Add `EDI_PERSONAL_API_KEY` to `.Renviron`, restart R, and check with `nzchar(Sys.getenv("EDI_PERSONAL_API_KEY"))`. |
+| EDI login succeeds but upload fails | Check the log `Details` and confirm that the personal EDI account has the necessary write/vetted-group permissions. |
+| Upload confirmation cancels unexpectedly | Run `upload_approved()` directly in the RStudio Console, then type the confirmation phrase manually. |
 
 ## Repository structure
 
@@ -526,6 +701,9 @@ source sheets before curating any external records.
 - `R/01_get_dataset_dois.R` creates `Data_Registry.xlsx`.
 - `R/02_find_dataset_citations.R` creates `Publication_Search_Results.xlsx`
   and maintains `openalex_cache.rds`.
+- `R/03_review_and_add_edi_citations.R` creates an EDI review workbook and,
+  after explicit approval and confirmation, can upload citations to EDI
+  production.
 - `R/utils.R` contains shared request, normalization, evidence-merging, and
   comparison helpers. The scripts source it automatically.
 - `dataset-citation-finder.Rproj` opens the repository as an RStudio project.
